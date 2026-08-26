@@ -1,6 +1,6 @@
 # duckdb-mmcif
 
-A DuckDB extension that exposes mmCIF (PDBx) structural-biology data files as read-only DuckDB tables. It builds on the RCSB `cpp-cif-parser` / `cpp-cif-file` core libraries (see `modules/`) and is loaded through the `waddle` extension.
+A DuckDB extension that exposes mmCIF (PDBx) structural-biology data files as read-only DuckDB tables. It builds on the RCSB `cpp-cif-parser` / `cpp-cif-file` core libraries (see `modules/`).
 
 With this extension you can `ATTACH` a `.cif` file and immediately query every category in it as a normal DuckDB table, with column types inferred from the embedded [mmCIF dictionary](https://mmcif.wwpdb.org/) type index.
 
@@ -17,7 +17,7 @@ The main binaries built are:
 ```sh
 ./build/release/duckdb                                # duckdb shell with the extension pre-loaded
 ./build/release/test/unittest                         # DuckDB test runner (extension linked in)
-./build/release/extension/waddle/waddle.duckdb_extension   # loadable extension binary
+./build/release/extension/mmcif/mmcif.duckdb_extension   # loadable extension binary
 ```
 
 To speed up rebuilds install [ccache](https://ccache.dev/) and [ninja](https://ninja-build.org/) and build with `GEN=ninja make`.
@@ -100,12 +100,12 @@ UPDATE atom_site SET type_symbol='X';  -- Binder Error: Can only update base tab
 
 ## Loading the distributed binary
 
-The loadable extension (`waddle.duckdb_extension`) can be loaded into a DuckDB started with unsigned extensions allowed:
+The loadable extension (`mmcif.duckdb_extension`) can be loaded into a DuckDB started with unsigned extensions allowed:
 
 ```sh
 duckdb -unsigned
 ```
 
 ```sql
-LOAD 'build/release/extension/waddle/waddle.duckdb_extension';
+LOAD 'build/release/extension/mmcif/mmcif.duckdb_extension';
 ```

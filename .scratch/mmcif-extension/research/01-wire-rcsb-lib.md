@@ -86,7 +86,7 @@ add_flex_bison_dependency(flextarget1 bisontarget1)
 - The scanner needs POSIX `fileno()`; DuckDB does not pin `CMAKE_C_STANDARD`, so C files compile with the compiler default (gnu) where `fileno` is declared. (A strict `-std=c11` hides it, but DuckDB doesn't use strict c11.)
 
 ### Does it build inside DuckDB's CMake?
-Yes. The extension's `CMakeLists.txt` is included as a CMake subdirectory (`add_subdirectory(... extension/waddle)` in `duckdb/extension/extension_build_tools.cmake`), and the `find_package` + `flex_target`/`bison_target` pattern is just CMake — so it runs inside DuckDB's build with no separate step.
+Yes. The extension's `CMakeLists.txt` is included as a CMake subdirectory (`add_subdirectory(... extension/mmcif)` in `duckdb/extension/extension_build_tools.cmake`), and the `find_package` + `flex_target`/`bison_target` pattern is just CMake — so it runs inside DuckDB's build with no separate step.
 
 ### Tool availability in DuckDB CI
 flex and bison are already installed in DuckDB's extension build environments:
@@ -100,7 +100,7 @@ DuckDB core itself does not use flex/bison (no matches in duckdb CMake), but the
 ## 3. CMake wiring into CMakeLists.txt / extension_config.cmake, static vs loadable, vcpkg, C++ flags
 
 ### Current template wiring (this repo)
-- `extension_config.cmake` registers the extension: `duckdb_extension_load(waddle SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR})` — DuckDB's `register_extension` then does `add_subdirectory(... extension/waddle)` (`duckdb/extension/extension_build_tools.cmake`).
+- `extension_config.cmake` registers the extension: `duckdb_extension_load(mmcif SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR})` — DuckDB's `register_extension` then does `add_subdirectory(... extension/mmcif)` (`duckdb/extension/extension_build_tools.cmake`).
 - Top-level `CMakeLists.txt` builds two targets from `EXTENSION_SOURCES`:
   - `build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})` → `${NAME}_extension` **STATIC** lib linking `duckdb_static`.
   - `build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})` → `${NAME}_loadable_extension` **SHARED** lib (`build_loadable_extension_directory` in `extension_build_tools.cmake`).

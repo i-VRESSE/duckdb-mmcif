@@ -14,7 +14,7 @@ SELECT * FROM mmcif_relationships('x.cif');
 Catalog Error: Table Function with name mmcif_relationships does not exist!
 
 # Require statement will ensure this test is run with this extension loaded
-require waddle
+require mmcif
 
 # Global metadata table functions work without ATTACH
 query I
