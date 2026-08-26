@@ -40,16 +40,16 @@ Start the shell (the extension is pre-loaded):
 
 ### ATTACH a cif file
 
-Attach a `.cif` file as a database using the `mmcif` storage type:
+Attach a `.cif` file as a database using the `mmcif` storage type. Give it an explicit alias so the catalog name is predictable:
 
 ```sql
-ATTACH '1amb_updated.cif' (TYPE mmcif);
+ATTACH '1amb_updated.cif' AS mmcifdb (TYPE mmcif);
 ```
 
-The database name is derived from the file name, so `USE` the catalog (quoted, since names starting with digits need quoting):
+Without an alias the database name is derived from the file name. Either way, `USE` the catalog to make its tables current:
 
 ```sql
-USE "1amb_updated";
+USE mmcifdb;
 ```
 
 ### Query categories as tables
