@@ -40,10 +40,16 @@ Start the shell (the extension is pre-loaded):
 
 ### ATTACH a cif file
 
+The examples below use a sample file `test/data/1amb_updated.cif` (the fixture the SQL tests rely on). Download it with:
+
+```sh
+curl -o test/data/1amb_updated.cif https://www.ebi.ac.uk/pdbe/entry-files/download/1amb_updated.cif
+```
+
 Attach a `.cif` file as a database using the `mmcif` storage type. Give it an explicit alias so the catalog name is predictable:
 
 ```sql
-ATTACH '1amb_updated.cif' AS mmcifdb (TYPE mmcif);
+ATTACH 'test/data/1amb_updated.cif' AS mmcifdb (TYPE mmcif);
 ```
 
 Without an alias the database name is derived from the file name. Either way, `USE` the catalog to make its tables current:
@@ -79,13 +85,13 @@ The extension also provides three global table functions that work without attac
 
 ```sql
 -- one row per (category, column) with its inferred type
-SELECT * FROM mmcif_tables('1amb_updated.cif');
+SELECT * FROM mmcif_tables('test/data/1amb_updated.cif');
 
 -- one row per parent/child category relationship
-SELECT * FROM mmcif_relationships('1amb_updated.cif');
+SELECT * FROM mmcif_relationships('test/data/1amb_updated.cif');
 
 -- scan a single category directly
-SELECT * FROM mmcif_scan('1amb_updated.cif', 'atom_site');
+SELECT * FROM mmcif_scan('test/data/1amb_updated.cif', 'atom_site');
 ```
 
 ### Read-only

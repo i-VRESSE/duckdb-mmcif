@@ -18,31 +18,31 @@ require mmcif
 
 # Global metadata table functions work without ATTACH
 query I
-SELECT count(*) FROM mmcif_tables('__WORKING_DIRECTORY__/1amb_updated.cif');
+SELECT count(*) FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/1amb_updated.cif');
 ----
 342
 
 query III
-SELECT table_name, column_name, column_type FROM mmcif_tables('__WORKING_DIRECTORY__/1amb_updated.cif') WHERE table_name='atom_site' ORDER BY column_name LIMIT 3;
+SELECT table_name, column_name, column_type FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/1amb_updated.cif') WHERE table_name='atom_site' ORDER BY column_name LIMIT 3;
 ----
 atom_site	B_iso_or_equiv	DOUBLE
 atom_site	Cartn_x	DOUBLE
 atom_site	Cartn_y	DOUBLE
 
 query I
-SELECT count(*) FROM mmcif_relationships('__WORKING_DIRECTORY__/1amb_updated.cif');
+SELECT count(*) FROM mmcif_relationships('__WORKING_DIRECTORY__/test/data/1amb_updated.cif');
 ----
 42
 
 query TT
-SELECT parent_category, child_category FROM mmcif_relationships('__WORKING_DIRECTORY__/1amb_updated.cif') WHERE parent_category='atom_site' ORDER BY child_category LIMIT 3;
+SELECT parent_category, child_category FROM mmcif_relationships('__WORKING_DIRECTORY__/test/data/1amb_updated.cif') WHERE parent_category='atom_site' ORDER BY child_category LIMIT 3;
 ----
 atom_site	pdbx_validate_torsion
 atom_site	struct_conf
 
 # ATTACH the cif file as an mmcif database
 statement ok
-ATTACH '__WORKING_DIRECTORY__/1amb_updated.cif' AS mmcifdb (TYPE mmcif);
+ATTACH '__WORKING_DIRECTORY__/test/data/1amb_updated.cif' AS mmcifdb (TYPE mmcif);
 
 statement ok
 USE mmcifdb;
@@ -88,7 +88,7 @@ SELECT count(*) FROM atom_site WHERE label_alt_id IS NULL;
 
 # mmcif_scan as a table function also works
 query I
-SELECT count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/1amb_updated.cif', 'atom_site');
+SELECT count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/1amb_updated.cif', 'atom_site');
 ----
 438
 
