@@ -133,10 +133,15 @@ private:
 
 static unique_ptr<CifFile> MmcifParseFile(const string &file_name, string &diags) {
 	auto cif_file = make_uniq<CifFile>(true); // virtual-mode ctor, no sdb backing file
-	std::ifstream in(file_name.c_str());
+	std::ifstream in(file_name.c_str(), std::ios::binary);
 	std::stringstream ss;
 	ss << in.rdbuf();
 	string content = ss.str();
+	// gzip'd mmcif files (e.g. https://files.rcsb.org/download/1AMB.cif.gz) are
+	// detected by magic bytes and decompressed before parsing.
+	if (GZipFileSystem::CheckIsZip(content.data(), content.size())) {
+		content = GZipFileSystem::UncompressGZIPString(content);
+	}
 	content += "\ndata_zzz_prototype\n#\n";
 	CifParser parser(cif_file.get(), CifFileReadDef(), cif_file->GetVerbose());
 	parser.ParseString(content, diags);

@@ -46,7 +46,7 @@ The examples below use a sample file `test/data/1amb_updated.cif` (the fixture t
 curl -o test/data/1amb_updated.cif https://www.ebi.ac.uk/pdbe/entry-files/download/1amb_updated.cif
 ```
 
-Attach a `.cif` file as a database using the `mmcif` storage type. Give it an explicit alias so the catalog name is predictable:
+Attach a `.cif` file as a database using the `mmcif` storage type. Gzip-compressed mmCIF files (e.g. RCSB's `*.cif.gz`, like `https://files.rcsb.org/download/1AMB.cif.gz`) are auto-detected and decompressed. Give it an explicit alias so the catalog name is predictable:
 
 ```sql
 ATTACH 'test/data/1amb_updated.cif' AS mmcifdb (TYPE mmcif);

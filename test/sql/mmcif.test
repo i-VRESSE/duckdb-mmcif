@@ -92,6 +92,37 @@ SELECT count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/1amb_updated.ci
 ----
 438
 
+# gzip'd mmcif files work the same way as uncompressed ones
+query I
+SELECT count(*) FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/1amb_updated.cif.gz');
+----
+342
+
+query I
+SELECT count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/1amb_updated.cif.gz', 'atom_site');
+----
+438
+
+query TT
+SELECT Cartn_x, type_symbol FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/1amb_updated.cif.gz', 'atom_site') ORDER BY label_atom_id LIMIT 2;
+----
+17.882	C
+16.209	C
+
+statement ok
+ATTACH '__WORKING_DIRECTORY__/test/data/1amb_updated.cif.gz' AS gzdb (TYPE mmcif);
+
+statement ok
+USE gzdb;
+
+query I
+SELECT count(*) FROM atom_site;
+----
+438
+
+statement ok
+USE mmcifdb;
+
 # mmcif databases are read-only
 statement error
 CREATE TABLE foo(i int);
