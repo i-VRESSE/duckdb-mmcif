@@ -1,0 +1,115 @@
+# name: test/sql/mmcif.test
+# description: mmcif extension: ATTACH a cif data file and expose categories as tables
+# group: [sql]
+
+# Before the extension is loaded, the mmcif table functions do not exist
+statement error
+SELECT * FROM mmcif_tables('x.cif');
+----
+Catalog Error: Table Function with name mmcif_tables does not exist!
+
+statement error
+SELECT * FROM mmcif_relationships('x.cif');
+----
+Catalog Error: Table Function with name mmcif_relationships does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require waddle
+
+# Global metadata table functions work without ATTACH
+query I
+SELECT count(*) FROM mmcif_tables('__WORKING_DIRECTORY__/1amb_updated.cif');
+----
+342
+
+query III
+SELECT table_name, column_name, column_type FROM mmcif_tables('__WORKING_DIRECTORY__/1amb_updated.cif') WHERE table_name='atom_site' ORDER BY column_name LIMIT 3;
+----
+atom_site	B_iso_or_equiv	DOUBLE
+atom_site	Cartn_x	DOUBLE
+atom_site	Cartn_y	DOUBLE
+
+query I
+SELECT count(*) FROM mmcif_relationships('__WORKING_DIRECTORY__/1amb_updated.cif');
+----
+42
+
+query TT
+SELECT parent_category, child_category FROM mmcif_relationships('__WORKING_DIRECTORY__/1amb_updated.cif') WHERE parent_category='atom_site' ORDER BY child_category LIMIT 3;
+----
+atom_site	pdbx_validate_torsion
+atom_site	struct_conf
+
+# ATTACH the cif file as an mmcif database
+statement ok
+ATTACH '__WORKING_DIRECTORY__/1amb_updated.cif' AS mmcifdb (TYPE mmcif);
+
+statement ok
+USE mmcifdb;
+
+# SHOW TABLES lists every category present in the file
+query T
+SELECT table_name FROM duckdb_tables() WHERE database_name='mmcifdb' ORDER BY table_name LIMIT 3;
+----
+atom_site
+atom_sites
+atom_type
+
+# The dictionary-driven column types come through the catalog
+query TT
+SELECT name, type FROM pragma_table_info('atom_site') WHERE name IN ('Cartn_x','label_seq_id','type_symbol') ORDER BY name;
+----
+Cartn_x	DOUBLE
+label_seq_id	BIGINT
+type_symbol	VARCHAR
+
+# Scanning works: count(*), typed values, and filters
+query I
+SELECT count(*) FROM atom_site;
+----
+438
+
+query I
+SELECT count(*) FROM atom_site WHERE Cartn_x > 5;
+----
+155
+
+query TT
+SELECT Cartn_x, type_symbol FROM atom_site ORDER BY label_atom_id LIMIT 2;
+----
+17.882	C
+16.209	C
+
+# '.' and '?' cells map to NULL
+query I
+SELECT count(*) FROM atom_site WHERE label_alt_id IS NULL;
+----
+438
+
+# mmcif_scan as a table function also works
+query I
+SELECT count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/1amb_updated.cif', 'atom_site');
+----
+438
+
+# mmcif databases are read-only
+statement error
+CREATE TABLE foo(i int);
+----
+Binder Error: mmcif databases are read-only - cannot CREATE TABLE
+
+statement error
+DELETE FROM atom_site;
+----
+Binder Error: Can only delete from base table
+
+statement error
+UPDATE atom_site SET type_symbol='X';
+----
+Binder Error: Can only update base table
+
+# A missing category is not exposed
+statement error
+SELECT * FROM nonexistent_table;
+----
+Catalog Error: Table with name nonexistent_table does not exist!

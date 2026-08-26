@@ -26,6 +26,8 @@ inline void WaddleOpenSSLVersionScalarFun(DataChunk &args, ExpressionState &stat
 	});
 }
 
+void MmcifExtensionLoad(ExtensionLoader &loader);
+
 static void LoadInternal(ExtensionLoader &loader) {
 	// Register a scalar function
 	auto waddle_scalar_function =
@@ -37,6 +39,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto waddle_openssl_version_scalar_function = ScalarFunction("waddle_openssl_version", {LogicalType::VARCHAR},
 	                                                             LogicalType::VARCHAR, WaddleOpenSSLVersionScalarFun);
 	loader.RegisterFunction(waddle_openssl_version_scalar_function);
+
+	MmcifExtensionLoad(loader);
 }
 
 void WaddleExtension::Load(ExtensionLoader &loader) {

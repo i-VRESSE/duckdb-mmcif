@@ -6,3 +6,19 @@
 	path = extension-ci-tools
 	url = https://github.com/duckdb/extension-ci-tools
 	branch = main
+# PROTOTYPE: RCSB C++ mmcif core submodules (minimal read-only data-file set, research 01)
+[submodule "modules/cpp-cif-file"]
+	path = modules/cpp-cif-file
+	url = https://github.com/rcsb/cpp-cif-file.git
+[submodule "modules/cpp-cif-parser"]
+	path = modules/cpp-cif-parser
+	url = https://github.com/rcsb/cpp-cif-parser.git
+[submodule "modules/cpp-common"]
+	path = modules/cpp-common
+	url = https://github.com/rcsb/cpp-common.git
+[submodule "modules/cpp-tables"]
+	path = modules/cpp-tables
+	url = https://github.com/rcsb/cpp-tables.git
+[submodule "modules/cc-regex"]
+	path = modules/cc-regex
+	url = https://github.com/rcsb/cc-regex.git
