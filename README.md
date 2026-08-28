@@ -87,21 +87,41 @@ The extension also provides three global table functions that work without attac
 -- one row per (category, column) with its inferred type
 SELECT * FROM mmcif_tables('test/data/1amb_updated.cif');
 
--- one row per parent/child category relationship
+-- one row per parent/child relationship, each side a (table, column) pair
 SELECT * FROM mmcif_relationships('test/data/1amb_updated.cif');
 
 -- scan a single category directly
 SELECT * FROM mmcif_scan('test/data/1amb_updated.cif', 'atom_site');
 ```
 
-### Read-only
+### Read-only (default)
 
-mmcif databases are read-only. Data definition and mutation statements are rejected:
+By default mmcif databases are read-only. Data definition and mutation statements are rejected:
 
 ```sql
 CREATE TABLE foo(i int);      -- Binder Error: mmcif databases are read-only - cannot CREATE TABLE
-DELETE FROM atom_site;        -- Binder Error: Can only delete from base table
-UPDATE atom_site SET type_symbol='X';  -- Binder Error: Can only update base table
+DELETE FROM atom_site;        -- Binder Error: mmcif databases are read-only - cannot DELETE
+UPDATE atom_site SET type_symbol='X';  -- Binder Error: mmcif databases are read-only - cannot UPDATE
+```
+
+### Write mode (READ_WRITE)
+
+Pass `READ_WRITE TRUE` to `ATTACH` to open the database in write mode. Row-level
+`INSERT`, `UPDATE`, and `DELETE` then mutate the underlying `.cif` data in memory
+(`row_id` is the physical row index of the category table), and the file is
+written back on `COMMIT`, `CHECKPOINT`, and `DETACH`. `ROLLBACK` discards the
+in-memory mutations by re-parsing the file from disk. Data definition statements
+(`CREATE`/`DROP`/`ALTER`) remain read-only.
+
+```sql
+ATTACH 'test/data/1amb_updated.cif' AS wdb (TYPE mmcif, READ_WRITE TRUE);
+USE wdb;
+
+BEGIN;
+INSERT INTO atom_site (label_atom_id, Cartn_x, type_symbol) VALUES ('O1', 3.5, 'O');
+UPDATE atom_site SET type_symbol='ZZ' WHERE label_atom_id='O1';
+DELETE FROM atom_site WHERE label_atom_id='O1';
+COMMIT;   -- writes the mutated CifFile back to the attached .cif
 ```
 
 ## Loading the distributed binary

@@ -5,8 +5,9 @@ Reads mmcif_pdbx_v50.dic (an mmcif file) and emits two compact gzip'd, sorted TS
 artifacts:
 
   * type index: each dictionary item `_category.item` -> its DuckDB column type
-  * relationships: parent_category_id -> child_category_id pairs from
-    `_pdbx_item_linked_group_list`
+  * relationships: parent_item -> child_item pairs from
+    `_pdbx_item_linked_group_list` (each item is a full `_category.item` key, so
+    both the table and its column are carried per side)
 
 Run off-repo / in CI on a version bump (rare); the artifacts are checked in and
 shipped with the extension. The build never downloads or parses the dictionary.
@@ -64,8 +65,9 @@ def parse_dict(path):
     """Return (items, relationships).
 
     items: list of (item_name, type_code) for every save_<item> saveframe.
-    relationships: set of (parent_category_id, child_category_id) from the
-    _pdbx_item_linked_group_list loop.
+    relationships: set of (parent_item, child_item) from the
+    _pdbx_item_linked_group_list loop, where each item is a full `_category.item`
+    key carrying both the category (table) and the data item (column).
     """
     item_type = None  # current saveframe's _item_type.code
     pdbx_item_type = None  # current saveframe's _pdbx_item_type.code
@@ -135,8 +137,8 @@ def parse_dict(path):
                 # data row(s) of the relationship loop; accumulate tokens
                 if rel_header and not rel_loop_cols:
                     rel_loop_cols = {
-                        "child_category_id": rel_header.index("_pdbx_item_linked_group_list.child_category_id"),
-                        "parent_category_id": rel_header.index("_pdbx_item_linked_group_list.parent_category_id"),
+                        "child_name": rel_header.index("_pdbx_item_linked_group_list.child_name"),
+                        "parent_name": rel_header.index("_pdbx_item_linked_group_list.parent_name"),
                     }
                     rel_ncols = len(rel_header)
                 if rel_loop_cols:
@@ -144,8 +146,8 @@ def parse_dict(path):
                     while len(rel_buf) >= rel_ncols:
                         row = rel_buf[:rel_ncols]
                         rel_buf = rel_buf[rel_ncols:]
-                        child = row[rel_loop_cols["child_category_id"]]
-                        parent = row[rel_loop_cols["parent_category_id"]]
+                        child = row[rel_loop_cols["child_name"]]
+                        parent = row[rel_loop_cols["parent_name"]]
                         if parent != "." and child != "." and parent != "?" and child != "?":
                             relationships.add((parent, child))
     return items, relationships
@@ -180,7 +182,7 @@ def main():
     rel_rows = sorted("%s\t%s" % (parent, child) for parent, child in relationships)
     rel_header = "# mmcif_pdbx_v50.dic v%s parent->child relationships\n" % DIC_VERSION
     rel_header += "# source: %s\n" % SOURCE_URL
-    rel_header += "# column: <parent_category_id>\\t<child_category_id>\n"
+    rel_header += "# column: <parent_item (_category.item)>\t<child_item (_category.item)>\n"
     write_gz(rel_out, rel_header, rel_rows)
     return 0
 

@@ -32,13 +32,14 @@ atom_site	Cartn_y	DOUBLE
 query I
 SELECT count(*) FROM mmcif_relationships('__WORKING_DIRECTORY__/test/data/1amb_updated.cif');
 ----
-42
+86
 
-query TT
-SELECT parent_category, child_category FROM mmcif_relationships('__WORKING_DIRECTORY__/test/data/1amb_updated.cif') WHERE parent_category='atom_site' ORDER BY child_category LIMIT 3;
+query TTTT
+SELECT parent_table, parent_column, child_table, child_column FROM mmcif_relationships('__WORKING_DIRECTORY__/test/data/1amb_updated.cif') WHERE parent_table='atom_site' ORDER BY child_table, child_column LIMIT 3;
 ----
-atom_site	pdbx_validate_torsion
-atom_site	struct_conf
+atom_site	pdbx_PDB_ins_code	pdbx_validate_torsion	PDB_ins_code
+atom_site	pdbx_PDB_model_num	pdbx_validate_torsion	PDB_model_num
+atom_site	auth_asym_id	pdbx_validate_torsion	auth_asym_id
 
 # ATTACH the cif file as an mmcif database
 statement ok
@@ -132,15 +133,121 @@ Binder Error: mmcif databases are read-only - cannot CREATE TABLE
 statement error
 DELETE FROM atom_site;
 ----
-Binder Error: Can only delete from base table
+Binder Error: mmcif databases are read-only - cannot DELETE
 
 statement error
 UPDATE atom_site SET type_symbol='X';
 ----
-Binder Error: Can only update base table
+Binder Error: mmcif databases are read-only - cannot UPDATE
 
 # A missing category is not exposed
 statement error
 SELECT * FROM nonexistent_table;
 ----
 Catalog Error: Table with name nonexistent_table does not exist!
+
+# ---------------------------------------------------------------------------
+# Write mode (issue 01/02): ATTACH ... (READ_WRITE TRUE) enables row-level
+# INSERT/UPDATE/DELETE, with write-back on COMMIT and ROLLBACK discarding.
+# ---------------------------------------------------------------------------
+
+# Create a small writable cif fixture inside the test temp dir
+statement ok
+COPY (SELECT 'data_test loop_ _atom_site.label_atom_id _atom_site.Cartn_x _atom_site.type_symbol C1 1.5 C N1 2.5 N' AS s) TO '__TEST_DIR__/mmcif_write.cif' (FORMAT CSV, HEADER 0);
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_write.cif' AS wdb (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok
+USE wdb;
+
+# Initial contents
+query I
+SELECT count(*) FROM atom_site;
+----
+2
+
+query TT
+SELECT label_atom_id, Cartn_x FROM atom_site ORDER BY label_atom_id;
+----
+C1	1.5
+N1	2.5
+
+# All DML inside one explicit transaction; COMMIT writes back to the .cif
+statement ok
+BEGIN;
+
+# INSERT appends a row (row_id == physical row index)
+statement ok
+INSERT INTO atom_site (label_atom_id, Cartn_x, type_symbol) VALUES ('O1', 3.5, 'O');
+
+query I
+SELECT count(*) FROM atom_site;
+----
+3
+
+# UPDATE mutates in place
+statement ok
+UPDATE atom_site SET type_symbol='ZZ' WHERE label_atom_id='O1';
+
+query T
+SELECT type_symbol FROM atom_site WHERE label_atom_id='O1';
+----
+ZZ
+
+# DELETE removes a row
+statement ok
+DELETE FROM atom_site WHERE label_atom_id='O1';
+
+query I
+SELECT count(*) FROM atom_site;
+----
+2
+
+# COMMIT persists the mutations to the .cif file
+statement ok
+COMMIT;
+
+# ROLLBACK discards in-memory mutations by re-parsing from disk
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO atom_site (label_atom_id, Cartn_x, type_symbol) VALUES ('O2', 4.5, 'O');
+
+query I
+SELECT count(*) FROM atom_site;
+----
+3
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT count(*) FROM atom_site;
+----
+2
+
+# Re-attach in a fresh database: committed changes are still there
+statement ok
+USE memory;
+
+statement ok
+DETACH wdb;
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_write.cif' AS rdb (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok
+USE rdb;
+
+query I
+SELECT count(*) FROM atom_site;
+----
+2
+
+query TT
+SELECT label_atom_id, Cartn_x FROM atom_site ORDER BY label_atom_id;
+----
+C1	1.5
+N1	2.5
