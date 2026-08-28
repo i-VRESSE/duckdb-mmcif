@@ -94,6 +94,14 @@ SELECT * FROM mmcif_relationships('test/data/1amb_updated.cif');
 SELECT * FROM mmcif_scan('test/data/1amb_updated.cif', 'atom_site');
 ```
 
+Entity/relationship diagram of the categories in `test/data/1amb_updated.cif`, as returned by `mmcif_relationships()`:
+
+<!-- Generated with:
+    python3 scripts/mmcif_relationships_diagram.py test/data/1amb_updated.cif -f dot \
+      | dot -Tsvg -o rel.svg
+-->
+![mmcif relationships diagram](rel.svg)
+
 ### Read-only (default)
 
 By default mmcif databases are read-only. Data definition and mutation statements are rejected:
