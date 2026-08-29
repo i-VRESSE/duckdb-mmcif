@@ -1,97 +1,73 @@
 # duckdb-mmcif
 
-A DuckDB extension that exposes mmCIF (PDBx) structural-biology data files as read-only DuckDB tables. It builds on the RCSB `cpp-cif-parser` / `cpp-cif-file` core libraries (see `modules/`).
+Query [mmCIF](https://mmcif.wwpdb.org/) (PDBx) structural-biology files with SQL, right inside [DuckDB](https://duckdb.org/).
 
-With this extension you can `ATTACH` a `.cif` file and immediately query every category in it as a normal DuckDB table, with column types inferred from the embedded [mmCIF dictionary](https://mmcif.wwpdb.org/) type index.
+`ATTACH` a `.cif` file and every mmCIF category shows up as a normal DuckDB table — with column types inferred from the PDBx/mmCIF dictionary. No ETL, no schema design, no Python parsing loop: just SQL over macromolecular structure data.
 
-## Building
+## What is mmCIF?
 
-Requires DuckDB and the extension-ci-tools submodules; fetch them with `--recurse-submodules` when cloning.
+mmCIF (also called PDBx) is the standard file format of the [Protein Data Bank](https://www.rcsb.org/) — it describes every experimentally determined macromolecular structure: proteins, nucleic acids, ligands, crystals, and all the experimental metadata behind them. A single entry is a set of *categories* (tables) such as `atom_site` (one row per atom with 3D coordinates), `entity`, `struct_ref_seq`, or `reflns` (diffraction reflections), linked by keys.
 
-```sh
-make
-```
+The format is powerful but awkward to analyze: files are large, syntax is quirky (multi-line fields, quoted values, `.`/`?` nulls), and joining related categories by hand is tedious. This extension turns that into plain SQL.
 
-The main binaries built are:
+## Why use it?
 
-```sh
-./build/release/duckdb                                # duckdb shell with the extension pre-loaded
-./build/release/test/unittest                         # DuckDB test runner (extension linked in)
-./build/release/extension/mmcif/mmcif.duckdb_extension   # loadable extension binary
-```
+- **Zero setup analysis** — attach a file and query it; works on your laptop, on thousands of files, or via DuckDB's S3/HTTP filesystems.
+- **Typed out of the box** — column types come from the mmCIF dictionary type index, so `Cartn_x` is a `DOUBLE` and `label_seq_id` is a `BIGINT`. `.` and `?` become `NULL`.
+- **Gzip support** — RCSB-style `*.cif.gz` files (e.g. `https://files.rcsb.org/download/1AMB.cif.gz`) are auto-detected and decompressed.
+- **Relationships as data** — discover how categories reference each other programmatically with `mmcif_relationships()`, instead of reading the 10,000-line dictionary.
+- **Fast** — built on the RCSB [`libcifpp`](https://github.com/rcsb/cifpp)-style `cpp-cif-parser` / `cpp-cif-file` core, with DuckDB's vectorized execution on top.
+- **Safe by default** — attached databases are read-only unless you explicitly opt in to write mode.
 
-To speed up rebuilds install [ccache](https://ccache.dev/) and [ninja](https://ninja-build.org/) and build with `GEN=ninja make`.
+## Quick start
 
-## Running the tests
-
-SQL tests live in `./test/sql` (see `test/sql/mmcif.test`). Run them with:
+Load the extension into a DuckDB shell started with unsigned extensions allowed:
 
 ```sh
-make test
+duckdb -unsigned
 ```
-
-## Using the extension
-
-Start the shell (the extension is pre-loaded):
-
-```sh
-./build/release/duckdb
-```
-
-### ATTACH a cif file
-
-The examples below use a sample file `test/data/1amb_updated.cif` (the fixture the SQL tests rely on). Download it with:
-
-```sh
-curl -o test/data/1amb_updated.cif https://www.ebi.ac.uk/pdbe/entry-files/download/1amb_updated.cif
-```
-
-Attach a `.cif` file as a database using the `mmcif` storage type. Gzip-compressed mmCIF files (e.g. RCSB's `*.cif.gz`, like `https://files.rcsb.org/download/1AMB.cif.gz`) are auto-detected and decompressed. Give it an explicit alias so the catalog name is predictable:
 
 ```sql
-ATTACH 'test/data/1amb_updated.cif' AS mmcifdb (TYPE mmcif);
-```
+LOAD 'mmcif.duckdb_extension';
 
-Without an alias the database name is derived from the file name. Either way, `USE` the catalog to make its tables current:
-
-```sql
+ATTACH '1amb_updated.cif' AS mmcifdb (TYPE mmcif);
 USE mmcifdb;
+
+SHOW TABLES;                 -- every category in the file
+
+SELECT count(*) FROM atom_site;
+-- 438
+
+SELECT type_symbol, count(*) AS n
+FROM atom_site
+GROUP BY 1
+ORDER BY n DESC;
+
+SELECT Cartn_x, Cartn_y, Cartn_z, type_symbol
+FROM atom_site
+WHERE type_symbol = 'ZN';
 ```
 
-### Query categories as tables
-
-Each category in the file becomes a table. List them with `SHOW TABLES` (43 categories for the sample file), inspect a table, and scan it:
+Column types are inferred from the mmCIF dictionary (`dict/mmcif_pdbx_v50_type_index.tsv.gz`):
 
 ```sql
-SHOW TABLES;
-
 DESCRIBE atom_site;
 -- Cartn_x DOUBLE, label_seq_id BIGINT, type_symbol VARCHAR, ...
-
-SELECT count(*) FROM atom_site;          -- 438
-
-SELECT Cartn_x, type_symbol FROM atom_site ORDER BY label_atom_id LIMIT 2;
--- 17.882 C
--- 16.209 C
-
-SELECT count(*) FROM atom_site WHERE Cartn_x > 5;   -- 155
 ```
 
-Column types come from the mmCIF dictionary type index (`dict/mmcif_pdbx_v50_type_index.tsv.gz`), so e.g. `Cartn_x` is `DOUBLE` and `label_seq_id` is `BIGINT`. Cells containing `.` or `?` are mapped to `NULL`.
+## Table functions
 
-### Metadata table functions
-
-The extension also provides three global table functions that work without attaching a database:
+Three global table functions work without attaching anything:
 
 ```sql
 -- one row per (category, column) with its inferred type
-SELECT * FROM mmcif_tables('test/data/1amb_updated.cif');
+SELECT * FROM mmcif_tables('1amb_updated.cif');
 
 -- one row per parent/child relationship, each side a (table, column) pair
-SELECT * FROM mmcif_relationships('test/data/1amb_updated.cif');
+SELECT * FROM mmcif_relationships('1amb_updated.cif');
 
 -- scan a single category directly
-SELECT * FROM mmcif_scan('test/data/1amb_updated.cif', 'atom_site');
+SELECT * FROM mmcif_scan('1amb_updated.cif', 'atom_site');
 ```
 
 Entity/relationship diagram of the categories in `test/data/1amb_updated.cif`, as returned by `mmcif_relationships()`:
@@ -102,27 +78,21 @@ Entity/relationship diagram of the categories in `test/data/1amb_updated.cif`, a
 -->
 ![mmcif relationships diagram](rel.svg)
 
-### Read-only (default)
+## Read-only by default
 
-By default mmcif databases are read-only. Data definition and mutation statements are rejected:
+Attached mmcif databases are read-only; data definition and mutation statements are rejected:
 
 ```sql
 CREATE TABLE foo(i int);      -- Binder Error: mmcif databases are read-only - cannot CREATE TABLE
 DELETE FROM atom_site;        -- Binder Error: mmcif databases are read-only - cannot DELETE
-UPDATE atom_site SET type_symbol='X';  -- Binder Error: mmcif databases are read-only - cannot UPDATE
 ```
 
-### Write mode (READ_WRITE)
+## Write mode
 
-Pass `READ_WRITE TRUE` to `ATTACH` to open the database in write mode. Row-level
-`INSERT`, `UPDATE`, and `DELETE` then mutate the underlying `.cif` data in memory
-(`row_id` is the physical row index of the category table), and the file is
-written back on `COMMIT`, `CHECKPOINT`, and `DETACH`. `ROLLBACK` discards the
-in-memory mutations by re-parsing the file from disk. Data definition statements
-(`CREATE`/`DROP`/`ALTER`) remain read-only.
+Pass `READ_WRITE TRUE` to `ATTACH` to edit the file with SQL. `INSERT`, `UPDATE`, and `DELETE` mutate the parsed `.cif` data in memory (`row_id` is the physical row index of the category table); the file is written back on `COMMIT`, `CHECKPOINT`, and `DETACH`. `ROLLBACK` re-parses the file from disk. Data definition statements (`CREATE`/`DROP`/`ALTER`) stay disabled.
 
 ```sql
-ATTACH 'test/data/1amb_updated.cif' AS wdb (TYPE mmcif, READ_WRITE TRUE);
+ATTACH '1amb_updated.cif' AS wdb (TYPE mmcif, READ_WRITE TRUE);
 USE wdb;
 
 BEGIN;
@@ -132,14 +102,13 @@ DELETE FROM atom_site WHERE label_atom_id='O1';
 COMMIT;   -- writes the mutated CifFile back to the attached .cif
 ```
 
-## Loading the distributed binary
+## Examples
 
-The loadable extension (`mmcif.duckdb_extension`) can be loaded into a DuckDB started with unsigned extensions allowed:
+Ready-to-run example scripts live in [`docs/examples/`](docs/examples/):
 
-```sh
-duckdb -unsigned
-```
+- [`keep_chain_A.sql`](docs/examples/keep_chain_A.sql) — filters an mmCIF file down to a single auth chain (chain A of `3PLZ`, downloaded from https://files.rcsb.org/download/3PLZ.cif.gz), deleting rows in every dependent category that do not belong to that chain. Uses `mmcif_relationships()` to work out which tables reference chains.
+- [`spatial_atoms.sql`](docs/examples/spatial_atoms.sql) — 3D geometry analysis of `atom_site` coordinates with the [spatial extension](https://duckdb.org/docs/stable/core_extensions/spatial/overview.html): binding-pocket residues around the `3PLZ` inhibitor, chain–chain interface contacts, hydration shell, bounding box, rigid-body transforms, and Cα trace export.
 
-```sql
-LOAD 'build/release/extension/mmcif/mmcif.duckdb_extension';
-```
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build and test instructions.
