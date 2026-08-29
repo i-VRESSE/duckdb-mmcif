@@ -11,6 +11,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/common/gzip_file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/reference_map.hpp"
@@ -141,12 +142,48 @@ private:
 // keep only the FIRST data block (issue 04).
 // ---------------------------------------------------------------------------
 
-static unique_ptr<CifFile> MmcifParseFile(const string &file_name, string &diags) {
-	auto cif_file = make_uniq<CifFile>(true); // virtual-mode ctor, no sdb backing file
+// Returns true for paths that reference a remote resource (http/https URL,
+// S3, etc.) rather than a local file. Remote paths are handled by DuckDB's
+// virtual file system (httpfs is autoloaded) and are always read-only here.
+static bool MmcifIsRemotePath(const string &path) {
+	auto lower = StringUtil::Lower(path);
+	return lower.find("://") != string::npos;
+}
+
+// Read the raw bytes of a file. When a client context is available the read
+// goes through DuckDB's virtual file system, so http/https URLs (e.g.
+// https://files.rcsb.org/download/1AMB.cif.gz) and s3:// paths work and the
+// httpfs extension is autoloaded as needed. Falls back to std::ifstream for
+// callers without a context (always local paths).
+static string MmcifReadFileContents(const string &file_name, optional_ptr<ClientContext> context) {
+	if (context) {
+		auto &fs = FileSystem::GetFileSystem(*context);
+		if (!MmcifIsRemotePath(file_name) && !fs.FileExists(file_name)) {
+			throw IOException("mmcif: file not found: %s", file_name);
+		}
+		auto handle = fs.OpenFile(file_name, FileFlags::FILE_FLAGS_READ);
+		string content;
+		char buffer[65536];
+		while (true) {
+			auto n = fs.Read(*handle, buffer, sizeof(buffer));
+			if (n <= 0) {
+				break;
+			}
+			content.append(buffer, idx_t(n));
+		}
+		handle->Close();
+		return content;
+	}
 	std::ifstream in(file_name.c_str(), std::ios::binary);
 	std::stringstream ss;
 	ss << in.rdbuf();
-	string content = ss.str();
+	return ss.str();
+}
+
+static unique_ptr<CifFile> MmcifParseFile(const string &file_name, string &diags,
+                                          optional_ptr<ClientContext> context = nullptr) {
+	auto cif_file = make_uniq<CifFile>(true); // virtual-mode ctor, no sdb backing file
+	string content = MmcifReadFileContents(file_name, context);
 	// gzip'd mmcif files (e.g. https://files.rcsb.org/download/1AMB.cif.gz) are
 	// detected by magic bytes and decompressed before parsing.
 	if (GZipFileSystem::CheckIsZip(content.data(), content.size())) {
@@ -237,7 +274,7 @@ static unique_ptr<FunctionData> MmcifBind(ClientContext &context, TableFunctionB
 	result->table_name = table_name;
 
 	string diags;
-	auto cif_file = MmcifParseFile(file_name, diags);
+	auto cif_file = MmcifParseFile(file_name, diags, &context);
 	string first_block;
 	auto &table = MmcifGetTable(*cif_file, table_name, first_block);
 	MmcifLoadRows(table, *result);
@@ -350,9 +387,9 @@ static void MmcifMetaScan(ClientContext &context, TableFunctionInput &data, Data
 	output.SetCardinality(count);
 }
 
-static vector<string> MmcifFileCategories(const string &file_name) {
+static vector<string> MmcifFileCategories(const string &file_name, optional_ptr<ClientContext> context) {
 	string diags;
-	auto cif_file = MmcifParseFile(file_name, diags);
+	auto cif_file = MmcifParseFile(file_name, diags, context);
 	auto first_block = cif_file->GetFirstBlockName();
 	auto &block = cif_file->GetBlock(first_block);
 	vector<string> categories;
@@ -365,9 +402,9 @@ static unique_ptr<FunctionData> MmcifTablesBind(ClientContext &context, TableFun
                                                 vector<LogicalType> &return_types, vector<string> &names) {
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto result = make_uniq<MmcifMetaBindData>();
-	auto categories = MmcifFileCategories(file_name);
+	auto categories = MmcifFileCategories(file_name, &context);
 	string diags;
-	auto cif_file = MmcifParseFile(file_name, diags);
+	auto cif_file = MmcifParseFile(file_name, diags, &context);
 	auto first_block = cif_file->GetFirstBlockName();
 	auto &block = cif_file->GetBlock(first_block);
 	for (auto &category : categories) {
@@ -401,7 +438,7 @@ static unique_ptr<FunctionData> MmcifRelationshipsBind(ClientContext &context, T
                                                        vector<LogicalType> &return_types, vector<string> &names) {
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto result = make_uniq<MmcifMetaBindData>();
-	auto categories = MmcifFileCategories(file_name);
+	auto categories = MmcifFileCategories(file_name, &context);
 	case_insensitive_set_t present(categories.begin(), categories.end());
 	for (auto &rel : DictionaryIndex::Get().GetRelationships()) {
 		auto parent_item = MmcifSplitItem(rel.first);
@@ -429,7 +466,8 @@ static unique_ptr<FunctionData> MmcifRelationshipsBind(ClientContext &context, T
 class MmcifCatalog;
 
 // Resolve the CifFile to operate on (defined after MmcifCatalog is complete).
-static CifFile *MmcifResolveCifFile(MmcifCatalog *catalog, const string &file_name, unique_ptr<CifFile> &local);
+static CifFile *MmcifResolveCifFile(MmcifCatalog *catalog, const string &file_name, unique_ptr<CifFile> &local,
+                                    optional_ptr<ClientContext> context = nullptr);
 
 // ---------------------------------------------------------------------------
 // MmcifTableEntry: a real TableCatalogEntry whose ColumnList carries dictionary
@@ -460,7 +498,7 @@ public:
 		result->table_entry = this;
 
 		unique_ptr<CifFile> local;
-		auto cif_p = MmcifResolveCifFile(catalog, file_name, local);
+		auto cif_p = MmcifResolveCifFile(catalog, file_name, local, &context);
 		string first_block;
 		auto &table = MmcifGetTable(*cif_p, table_name, first_block);
 		MmcifLoadRows(table, *result);
@@ -572,7 +610,7 @@ MmcifTableEntry &MmcifSchemaEntry::GetTableEntry(CatalogTransaction transaction,
 	CreateTableInfo info(*this, entry_name);
 	auto &dict = DictionaryIndex::Get();
 	unique_ptr<CifFile> local;
-	auto cif_p = MmcifResolveCifFile(this->catalog, file_name, local);
+	auto cif_p = MmcifResolveCifFile(this->catalog, file_name, local, transaction.context);
 	string first_block;
 	auto &table = MmcifGetTable(*cif_p, entry_name, first_block);
 	auto col_names = table.GetColumnNames();
@@ -592,7 +630,7 @@ void MmcifSchemaEntry::Scan(ClientContext &context, CatalogType type,
 	}
 	vector<string> categories;
 	unique_ptr<CifFile> local;
-	auto cif_p = MmcifResolveCifFile(catalog, file_name, local);
+	auto cif_p = MmcifResolveCifFile(catalog, file_name, local, &context);
 	auto first_block = cif_p->GetFirstBlockName();
 	auto &block = cif_p->GetBlock(first_block);
 	block.GetTableNames(categories);
@@ -616,7 +654,7 @@ optional_ptr<CatalogEntry> MmcifSchemaEntry::LookupEntry(CatalogTransaction tran
 	}
 	auto entry_name = lookup_info.GetEntryName();
 	unique_ptr<CifFile> local;
-	auto cif_p = MmcifResolveCifFile(catalog, file_name, local);
+	auto cif_p = MmcifResolveCifFile(catalog, file_name, local, transaction.context);
 	auto first_block = cif_p->GetFirstBlockName();
 	auto &block = cif_p->GetBlock(first_block);
 	if (!block.IsTablePresent(entry_name)) {
@@ -668,11 +706,33 @@ public:
 		cif_file = MmcifParseFile(path, diags);
 	}
 	// COMMIT / detach / checkpoint: write the in-memory CifFile back to disk.
-	void Persist() {
+	// Paths ending in .gz are written back gzip-compressed (the read path
+	// auto-decompresses them, so writing plain text would break the round-trip).
+	void Persist(ClientContext &context) {
 		if (!write_mode || !cif_file) {
 			return;
 		}
-		cif_file->Write(path);
+		if (MmcifIsRemotePath(path)) {
+			throw IOException("mmcif: cannot write back to remote path %s - remote files are read-only", path);
+		}
+		if (StringUtil::EndsWith(StringUtil::Lower(path), ".gz")) {
+			// CifFile::Write always emits plain text; run it through DuckDB's
+			// gzip compression stream so the .cif.gz round-trips correctly.
+			std::ostringstream ss;
+			cif_file->Write(ss);
+			auto content = ss.str();
+			auto &fs = FileSystem::GetFileSystem(context);
+			FileOpenFlags flags = FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW;
+			flags.SetCompression(FileCompressionType::GZIP);
+			auto handle = fs.OpenFile(path, flags);
+			if (!content.empty()) {
+				fs.Write(*handle, data_ptr_cast(&content[0]), content.size());
+			}
+			// Closing the handle flushes the gzip footer (deflate stream end).
+			handle->Close();
+		} else {
+			cif_file->Write(path);
+		}
 	}
 
 	void Initialize(bool load_builtin) override {
@@ -681,7 +741,7 @@ public:
 	}
 
 	void OnDetach(ClientContext &context) override {
-		Persist();
+		Persist(context);
 	}
 
 	string GetCatalogType() override {
@@ -805,13 +865,14 @@ private:
 // persistent CifFile; read-only mode parses a fresh copy into `local` (kept
 // alive by the caller).
 // ---------------------------------------------------------------------------
-static CifFile *MmcifResolveCifFile(MmcifCatalog *catalog, const string &file_name, unique_ptr<CifFile> &local) {
+static CifFile *MmcifResolveCifFile(MmcifCatalog *catalog, const string &file_name, unique_ptr<CifFile> &local,
+                                    optional_ptr<ClientContext> context) {
 	auto persistent = catalog->GetCifFile();
 	if (persistent) {
 		return persistent;
 	}
 	string diags;
-	local = MmcifParseFile(file_name, diags);
+	local = MmcifParseFile(file_name, diags, context);
 	return local.get();
 }
 
@@ -824,6 +885,10 @@ static CifFile *MmcifResolveCifFile(MmcifCatalog *catalog, const string &file_na
 struct MmcifWriteGlobalState : public GlobalSinkState {
 	idx_t count = 0;
 	mutex lock;
+	// DELETE row ids are accumulated across sink chunks and applied once in Combine:
+	// row ids refer to positions in the table as it was when the scan started, so
+	// applying them chunk-by-chunk would use stale indices after the first shrink.
+	vector<unsigned int> delete_indices;
 };
 
 static string MmcifCellToString(const Vector &vec, idx_t row) {
@@ -937,22 +1002,30 @@ public:
 	}
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override {
 		auto &gstate = input.global_state.Cast<MmcifWriteGlobalState>();
-		auto &cif = *catalog.GetCifFile();
-		string first_block;
-		auto &table = MmcifGetTable(cif, table_name, first_block);
 		chunk.Flatten();
 		auto &row_ids = chunk.data[row_id_index];
 		auto row_data = FlatVector::GetData<int64_t>(row_ids);
-		vector<unsigned int> indices;
+		lock_guard<mutex> l(gstate.lock);
 		for (idx_t r = 0; r < chunk.size(); r++) {
-			indices.push_back(NumericCast<unsigned int>(row_data[r]));
+			gstate.delete_indices.push_back(NumericCast<unsigned int>(row_data[r]));
 		}
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+	SinkCombineResultType Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const override {
+		auto &gstate = input.global_state.Cast<MmcifWriteGlobalState>();
+		lock_guard<mutex> l(gstate.lock);
+		vector<unsigned int> indices;
+		indices.swap(gstate.delete_indices);
 		sort(indices.begin(), indices.end());
 		indices.erase(unique(indices.begin(), indices.end()), indices.end());
-		lock_guard<mutex> l(gstate.lock);
-		table.DeleteRows(indices);
-		gstate.count += chunk.size();
-		return SinkResultType::NEED_MORE_INPUT;
+		if (!indices.empty()) {
+			auto &cif = *catalog.GetCifFile();
+			string first_block;
+			auto &table = MmcifGetTable(cif, table_name, first_block);
+			table.DeleteRows(indices);
+			gstate.count += indices.size();
+		}
+		return SinkCombineResultType::FINISHED;
 	}
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override {
 		return make_uniq<GlobalSourceState>();
@@ -1049,7 +1122,7 @@ public:
 
 	ErrorData CommitTransaction(ClientContext &context, Transaction &transaction) override {
 		// D5: write the mutated in-memory CifFile back to the attached .cif on COMMIT.
-		catalog.Persist();
+		catalog.Persist(context);
 		lock_guard<mutex> l(lock);
 		transactions.erase(transaction);
 		return ErrorData();
@@ -1066,7 +1139,7 @@ public:
 		if (!catalog.IsWriteMode()) {
 			throw NotImplementedException("Cannot CHECKPOINT a read-only mmcif database");
 		}
-		catalog.Persist();
+		catalog.Persist(context);
 	}
 
 private:
@@ -1108,7 +1181,15 @@ static bool MmcifAttachWriteMode(const AttachInfo &info) {
 static unique_ptr<Catalog> MmcifAttach(optional_ptr<StorageExtensionInfo> storage_info, ClientContext &context,
                                        AttachedDatabase &db, const string &name, AttachInfo &info,
                                        AttachOptions &attach_options) {
-	return make_uniq<MmcifCatalog>(db, info.path, MmcifAttachWriteMode(info));
+	bool write_mode = MmcifAttachWriteMode(info);
+	// Remote files (http/https/s3/...) are served through a streaming file
+	// system and cannot be rewritten in place, so they are always read-only.
+	if (write_mode && MmcifIsRemotePath(info.path)) {
+		throw InvalidInputException(
+		    "mmcif: remote file '%s' cannot be attached with READ_WRITE - remote mmcif files are read-only",
+		    info.path);
+	}
+	return make_uniq<MmcifCatalog>(db, info.path, write_mode);
 }
 
 static unique_ptr<TransactionManager> MmcifCreateTransactionManager(optional_ptr<StorageExtensionInfo> storage_info,

@@ -251,3 +251,154 @@ SELECT label_atom_id, Cartn_x FROM atom_site ORDER BY label_atom_id;
 ----
 C1	1.5
 N1	2.5
+
+# ---------------------------------------------------------------------------
+# DELETE regressions: row ids refer to positions in the table at scan time,
+# so all matched ids of a statement must be applied once against the original
+# table. Applying them per sink chunk used stale indices after the first
+# shrink ("Invalid row index in ISTable::CacheRowLocation"), and a second
+# combine pass reused stale accumulated ids.
+# ---------------------------------------------------------------------------
+
+statement ok
+USE memory;
+
+# Fixture with one more row than STANDARD_VECTOR_SIZE so DELETEs span chunks
+statement ok
+COPY (SELECT 'data_test loop_ _atom_site.label_atom_id _atom_site.Cartn_x KEEP 0.0' AS s) TO '__TEST_DIR__/mmcif_delete.cif' (FORMAT CSV, HEADER 0);
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_delete.cif' AS ddb (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok
+USE ddb;
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO atom_site (label_atom_id, Cartn_x) SELECT 'r' || i, i FROM range(1, 5000) t(i);
+
+query I
+SELECT count(*) FROM atom_site;
+----
+5000
+
+# Multi-chunk DELETE: previously threw "Invalid row index" on the second chunk
+statement ok
+DELETE FROM atom_site WHERE label_atom_id <> 'KEEP';
+
+query I
+SELECT count(*) FROM atom_site;
+----
+1
+
+# Re-populate and delete through a subquery (MARK JOIN plan); the sink/combine
+# of this plan shape runs more than once, so deletes must apply exactly once
+statement ok
+INSERT INTO atom_site (label_atom_id, Cartn_x) SELECT 'r' || i, i FROM range(1, 5000) t(i);
+
+statement ok
+CREATE TEMP TABLE keep AS SELECT 'KEEP' AS lab;
+
+statement ok
+DELETE FROM atom_site WHERE label_atom_id NOT IN (SELECT lab FROM keep);
+
+query I
+SELECT count(*) FROM atom_site;
+----
+1
+
+# COMMIT persists both deletes; re-attach and verify the final state
+statement ok
+COMMIT;
+
+statement ok
+USE memory;
+
+statement ok
+DETACH ddb;
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_delete.cif' AS rdd (TYPE mmcif);
+
+statement ok
+USE rdd;
+
+query T
+SELECT label_atom_id FROM atom_site;
+----
+KEEP
+
+# ---------------------------------------------------------------------------
+# Gzip round-trip: a .cif.gz attached in write mode must be written back gzip
+# compressed (CifFile::Write itself always emits plain text).
+# ---------------------------------------------------------------------------
+
+statement ok
+USE memory;
+
+# COPY with a .gz target produces a gzip-compressed file
+statement ok
+COPY (SELECT 'data_gz loop_ _atom_site.label_atom_id _atom_site.Cartn_x G1 1.5' AS s) TO '__TEST_DIR__/mmcif_gz.cif.gz' (FORMAT CSV, HEADER 0);
+
+# The fixture really is gzip-compressed (gzip magic bytes)
+query I
+SELECT (lower(hex(content)) LIKE '1f8b%')::INT FROM read_blob('__TEST_DIR__/mmcif_gz.cif.gz');
+----
+1
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_gz.cif.gz' AS gdb (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok
+USE gdb;
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO atom_site (label_atom_id, Cartn_x) VALUES ('G2', 2.5);
+
+statement ok
+COMMIT;
+
+statement ok
+USE memory;
+
+statement ok
+DETACH gdb;
+
+# Still gzip after the write-back
+query I
+SELECT (lower(hex(content)) LIKE '1f8b%')::INT FROM read_blob('__TEST_DIR__/mmcif_gz.cif.gz');
+----
+1
+
+# ... and the category still round-trips with the inserted row
+statement ok
+ATTACH '__TEST_DIR__/mmcif_gz.cif.gz' AS rgdb (TYPE mmcif);
+
+statement ok
+USE rgdb;
+
+query T
+SELECT label_atom_id FROM atom_site ORDER BY label_atom_id;
+----
+G1
+G2
+
+# ---------------------------------------------------------------------------
+# Remote (http/https/s3/...) mmcif files are always read-only: attaching one
+# with READ_WRITE TRUE is rejected. (A URL scheme that DuckDB core recognizes
+# would first demand httpfs, so a non-core scheme is used here to exercise the
+# extension's own guard without needing network access.)
+# ---------------------------------------------------------------------------
+
+statement ok
+USE memory;
+
+statement error
+ATTACH 'weirdproto://x/y.cif' AS rdb (TYPE mmcif, READ_WRITE TRUE);
+----
+read-only
