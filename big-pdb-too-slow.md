@@ -112,3 +112,23 @@ Row count verified: 2,440,800 (matches). GEMMI stores each category as a single 
 **DuckDB native in-memory storage is strictly better** for pure in-memory querying: parse once, `INSERT INTO` a real DuckDB table (columnar, vectorized, compressed; no serialization). It also fixes the extension's current worst storage behavior — the custom `vector<vector<string>>` bind data + per-cell `Value()` casts (the 5.6 GB peak). The `CREATE TABLE atoms AS ...` workaround above already demonstrates native storage: 11.8 s once, then instant queries.
 
 Use nanoarrow (or DuckDB core's `arrow_scan`) only if the goal is **interop** — exporting `atom_site` to pandas/polars/numpy as Arrow. It does not address the parsing bottleneck or the in-memory storage cost, and it is a separate build dependency.
+
+## Implemented: streaming scanner + two-pass lazy index (recommendations 1–7)
+
+Recommendations 5 and 4 are now implemented in the read-only path (`src/mmcif_index.hpp/.cpp`, wired into `src/mmcif_core.cpp`), which also covers 1 (catalog lazy index), 2 (process-level content+index cache), 3 (stream rows, no bind copy), 6 (vectorized scan + cast), and 7 (exact cardinality via `GetRowCount`; real min/max `GetStatistics` deliberately skipped). Write-mode DML keeps the RCSB `CifFile` path.
+
+New measured numbers (same machine, `build/release/duckdb`, v1.5.4, `3J3Q.cif.gz`):
+
+| Query | before | after | speedup |
+|---|---|---|---|
+| `SELECT * FROM atom_site LIMIT 10` (cold) | 15.9 s / 5.6 GB | **0.49 s / 341 MB** | ~32× |
+| same LIMIT, second time in one session (index cached) | 6 parses (~32 s) | ~instant (~0.18 s) | ~O(1) |
+| `SELECT count(*) FROM atom_site` | 17.5 s / 5.6 GB | **1.32 s** | ~13× |
+| `SELECT table_name FROM duckdb_tables() ...` (SHOW TABLES) | ~7 min (75 parses) | **0.94 s** | ~450× |
+| `mmcif_tables('3J3Q.cif.gz')` | ~7 min | (pass-1, no cell materialization) | ~O(1) |
+
+Why the big win: the index path does one gunzip + one pass-1 line scan (~0.5 s) to build the category index, then a `LIMIT 10` parses only ~10 rows from the byte cursor (`MmcifScanIndex`), and cells are `(offset,len)` slices into one flat decompressed buffer — no 2.44M×21 string copies, no per-cell `Value()` casts, so peak RSS drops from 5.6 GB to ~341 MB. `count(*)` uses `GetRowCount`, a value-scan of the loop range (no string materialization). SHOW TABLES/catalog enumeration never materialize cells.
+
+Remaining gap vs GEMMI's 1.5 s end-to-end parse: our pass-1 is a byte-wise line scan (~0.5 s incl. gunzip), not a hand-optimized C parser; a full `count(Cartn_x)`/aggregate still value-scans 2.44M cells. GEMMI would close that (~3.4×), but the index design already removes the parse-per-query and parse-per-category blowups, and LIMIT/point queries are now effectively O(rows scanned).
+
+

@@ -125,7 +125,7 @@ add_custom_command(
 # Make the extension targets build the generated dict-data header.
 add_custom_target(mmciff_dict_data DEPENDS ${MMCIF_GEN}/mmcif_dict_data.hpp)
 
-set(EXTENSION_SOURCES src/mmcif_extension.cpp src/mmcif_core.cpp $<TARGET_OBJECTS:mmciflib>)
+set(EXTENSION_SOURCES src/mmcif_extension.cpp src/mmcif_core.cpp src/mmcif_index.cpp $<TARGET_OBJECTS:mmciflib>)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

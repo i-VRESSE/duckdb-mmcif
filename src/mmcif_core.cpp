@@ -41,6 +41,7 @@
 #include "duckdb/planner/operator/logical_update.hpp"
 #include "duckdb/common/constants.hpp"
 #include "duckdb/common/operator/numeric_cast.hpp"
+#include "duckdb/common/numeric_utils.hpp"
 
 #include <fstream>
 #include <sstream>
@@ -52,7 +53,11 @@
 #include "TableFile.h"
 #include "CifString.h"
 
+#include "mmcif_index.hpp"
+
 #include "mmcif_dict_data.hpp" // embedded gzip'd dictionary artifacts (CMake)
+
+#include "duckdb/common/vector_operations/vector_operations.hpp"
 
 namespace duckdb {
 
@@ -221,7 +226,13 @@ struct MmcifBindData : public FunctionData {
 	string table_name;
 	std::vector<std::string> column_names;
 	std::vector<LogicalType> column_types;
-	std::vector<std::vector<std::string>> rows; // row-major, values in column order
+	// Read-only path (recommendation 3/5): a shared lazy index + category. Rows
+	// are streamed from the byte cursor in MmcifScan; nothing is materialized at
+	// bind, so LIMIT 10 never copies 2.44M rows.
+	shared_ptr<MmcifIndex> index;
+	MmcifCategory *category = nullptr;
+	// Write-mode (legacy) path: materialized RCSB rows.
+	std::vector<std::vector<std::string>> rows;
 	optional_ptr<TableCatalogEntry> table_entry; // set only for attached-table scans
 
 	unique_ptr<FunctionData> Copy() const override {
@@ -230,6 +241,8 @@ struct MmcifBindData : public FunctionData {
 		result->table_name = table_name;
 		result->column_names = column_names;
 		result->column_types = column_types;
+		result->index = index;
+		result->category = category;
 		result->rows = rows;
 		result->table_entry = table_entry;
 		return std::move(result);
@@ -247,10 +260,36 @@ struct MmcifBindData : public FunctionData {
 struct MmcifGlobalState : public GlobalTableFunctionState {
 	MmcifGlobalState(const MmcifBindData &bind_p, const vector<column_t> &column_ids_p)
 	    : bind(bind_p), column_ids(column_ids_p), position(0) {
+		if (bind.index && bind.category) {
+			ncols = bind.category->columns.size();
+			full_to_out.assign(ncols, DConstants::INVALID_INDEX);
+			for (idx_t c = 0; c < column_ids.size(); c++) {
+				auto col_id = column_ids[c];
+				if (col_id != COLUMN_IDENTIFIER_ROW_ID && col_id != COLUMN_IDENTIFIER_EMPTY && col_id < ncols) {
+					full_to_out[col_id] = c;
+				}
+			}
+			single_by_col.assign(ncols, nullptr);
+			for (auto &s : bind.category->singles) {
+				if (s.col < ncols) {
+					single_by_col[s.col] = &s;
+				}
+			}
+			if (bind.category->is_loop) {
+				cursor = make_uniq<MmcifValueCursor>(bind.index->GetData(), bind.category->data_start,
+				                                     bind.category->data_end);
+			}
+		}
 	}
 	const MmcifBindData &bind;
 	vector<column_t> column_ids;
 	idx_t position;
+	idx_t ncols = 0;
+	vector<idx_t> full_to_out;                     // full column index -> output position
+	vector<const MmcifSingleCell *> single_by_col; // full column index -> single cell (broadcast)
+	unique_ptr<MmcifValueCursor> cursor;
+	bool done = false;
+	bool single_done = false;
 
 	idx_t MaxThreads() const override {
 		return 1;
@@ -265,6 +304,18 @@ static void MmcifLoadRows(ISTable &table, MmcifBindData &result) {
 	}
 }
 
+static void MmcifLoadIndex(MmcifBindData &result, shared_ptr<MmcifIndex> index, const string &table_name,
+                           const string &file_name) {
+	auto cat = index->FindCategory(table_name);
+	if (!cat || cat->columns.empty()) {
+		throw BinderException("mmcif: category '%s' not present in block '%s'", table_name.c_str(),
+		                      index->GetDataBlockName().c_str());
+	}
+	result.index = std::move(index);
+	result.category = cat;
+	result.column_names = cat->columns;
+}
+
 static unique_ptr<FunctionData> MmcifBind(ClientContext &context, TableFunctionBindInput &input,
                                           vector<LogicalType> &return_types, vector<string> &names) {
 	auto file_name = input.inputs[0].GetValue<string>();
@@ -273,11 +324,8 @@ static unique_ptr<FunctionData> MmcifBind(ClientContext &context, TableFunctionB
 	result->file_name = file_name;
 	result->table_name = table_name;
 
-	string diags;
-	auto cif_file = MmcifParseFile(file_name, diags, &context);
-	string first_block;
-	auto &table = MmcifGetTable(*cif_file, table_name, first_block);
-	MmcifLoadRows(table, *result);
+	auto index = MmcifIndex::Load(file_name, &context);
+	MmcifLoadIndex(*result, std::move(index), table_name, file_name);
 
 	for (auto &col : result->column_names) {
 		auto type = DictionaryIndex::Get().LookupType(table_name, col);
@@ -293,9 +341,103 @@ static unique_ptr<GlobalTableFunctionState> MmcifInitGlobal(ClientContext &conte
 	return make_uniq<MmcifGlobalState>(bind, input.column_ids);
 }
 
+// Index-backed scan (recommendation 3/5/6): parse the category's loop range
+// incrementally from the byte cursor, row-major, into per-column VARCHAR
+// vectors, then vectorized-cast each column to its dictionary type. LIMIT
+// pushdown falls out naturally: we stop after the requested rows are filled.
+static void MmcifScanIndex(ClientContext &context, TableFunctionInput &data, DataChunk &output,
+                           MmcifGlobalState &gstate) {
+	auto &cat = *gstate.bind.category;
+	idx_t out_cols = output.ColumnCount();
+	vector<unique_ptr<Vector>> tmp(out_cols);
+	vector<string_t *> ptrs(out_cols);
+	for (idx_t c = 0; c < out_cols; c++) {
+		tmp[c] = make_uniq<Vector>(LogicalType::VARCHAR);
+		ptrs[c] = FlatVector::GetData<string_t>(*tmp[c]);
+	}
+
+	idx_t count = 0;
+	if (cat.is_loop) {
+		idx_t loop_ncols = cat.loop_col_map.size();
+		while (count < STANDARD_VECTOR_SIZE && !gstate.done) {
+			bool ok = true;
+			for (idx_t li = 0; li < loop_ncols; li++) {
+				idx_t full_col = cat.loop_col_map[li];
+				idx_t out_pos = gstate.full_to_out[full_col];
+				const char *out;
+				idx_t len;
+				bool is_null;
+				if (!gstate.cursor->Next(&out, &len, &is_null)) {
+					ok = false;
+					break;
+				}
+				if (out_pos != DConstants::INVALID_INDEX) {
+					if (is_null) {
+						FlatVector::SetNull(*tmp[out_pos], count, true);
+					} else {
+						ptrs[out_pos][count] = string_t(out, UnsafeNumericCast<uint32_t>(len));
+					}
+				}
+			}
+			if (!ok) {
+				gstate.done = true;
+				break;
+			}
+			for (idx_t c = 0; c < out_cols; c++) {
+				auto col_id = gstate.column_ids[c];
+				if (col_id == COLUMN_IDENTIFIER_ROW_ID) {
+					output.data[c].SetValue(count, Value::Numeric(LogicalType::BIGINT, gstate.position));
+				} else if (col_id == COLUMN_IDENTIFIER_EMPTY) {
+					output.data[c].SetValue(count, Value(true));
+				}
+			}
+			count++;
+			gstate.position++;
+		}
+	} else {
+		// Single-tag category: exactly one row.
+		if (gstate.single_done) {
+			output.SetCardinality(0);
+			return;
+		}
+		for (idx_t c = 0; c < out_cols; c++) {
+			auto col_id = gstate.column_ids[c];
+			if (col_id == COLUMN_IDENTIFIER_ROW_ID) {
+				output.data[c].SetValue(0, Value::Numeric(LogicalType::BIGINT, 0));
+			} else if (col_id == COLUMN_IDENTIFIER_EMPTY) {
+				output.data[c].SetValue(0, Value(true));
+			} else {
+				auto sc = (col_id < gstate.ncols) ? gstate.single_by_col[col_id] : nullptr;
+				if (sc && !sc->is_null) {
+					ptrs[c][0] = string_t(gstate.bind.index->GetData() + sc->off, UnsafeNumericCast<uint32_t>(sc->len));
+				} else {
+					FlatVector::SetNull(*tmp[c], 0, true);
+				}
+			}
+		}
+		count = 1;
+		gstate.single_done = true;
+	}
+
+	// Vectorized cast VARCHAR -> dictionary type for each real column.
+	for (idx_t c = 0; c < out_cols; c++) {
+		auto col_id = gstate.column_ids[c];
+		if (col_id == COLUMN_IDENTIFIER_ROW_ID || col_id == COLUMN_IDENTIFIER_EMPTY) {
+			continue;
+		}
+		VectorOperations::Cast(context, *tmp[c], output.data[c], count);
+	}
+	output.SetCardinality(count);
+}
+
 static void MmcifScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &gstate = data.global_state->Cast<MmcifGlobalState>();
 	auto &bind = gstate.bind;
+	if (bind.index && bind.category) {
+		MmcifScanIndex(context, data, output, gstate);
+		return;
+	}
+	// Legacy write-mode scan over materialized rows.
 	idx_t row = gstate.position;
 	idx_t count = 0;
 	while (row < bind.rows.size() && count < STANDARD_VECTOR_SIZE) {
@@ -304,8 +446,6 @@ static void MmcifScan(ClientContext &context, TableFunctionInput &data, DataChun
 			auto col_id = gstate.column_ids[c];
 			auto &vec = output.data[c];
 			if (col_id == COLUMN_IDENTIFIER_ROW_ID || col_id == COLUMN_IDENTIFIER_EMPTY) {
-				// Virtual column requested for e.g. COUNT(*): emit a non-null value so rows are counted.
-				// ROW_TYPE == BIGINT, so the row_id column must be BIGINT to match the binder's projection.
 				if (col_id == COLUMN_IDENTIFIER_ROW_ID) {
 					vec.SetValue(count, Value::Numeric(LogicalType::BIGINT, row));
 				} else {
@@ -316,7 +456,7 @@ static void MmcifScan(ClientContext &context, TableFunctionInput &data, DataChun
 			if (MmcifBindData::IsNullCell(r[col_id])) {
 				vec.SetValue(count, Value());
 			} else {
-				vec.SetValue(count, Value(r[col_id])); // SetValue casts VARCHAR -> column type
+				vec.SetValue(count, Value(r[col_id]));
 			}
 		}
 		row++;
@@ -388,12 +528,9 @@ static void MmcifMetaScan(ClientContext &context, TableFunctionInput &data, Data
 }
 
 static vector<string> MmcifFileCategories(const string &file_name, optional_ptr<ClientContext> context) {
-	string diags;
-	auto cif_file = MmcifParseFile(file_name, diags, context);
-	auto first_block = cif_file->GetFirstBlockName();
-	auto &block = cif_file->GetBlock(first_block);
+	auto index = MmcifIndex::Load(file_name, context);
 	vector<string> categories;
-	block.GetTableNames(categories);
+	index->GetCategoryNames(categories);
 	return categories;
 }
 
@@ -402,15 +539,15 @@ static unique_ptr<FunctionData> MmcifTablesBind(ClientContext &context, TableFun
                                                 vector<LogicalType> &return_types, vector<string> &names) {
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto result = make_uniq<MmcifMetaBindData>();
-	auto categories = MmcifFileCategories(file_name, &context);
-	string diags;
-	auto cif_file = MmcifParseFile(file_name, diags, &context);
-	auto first_block = cif_file->GetFirstBlockName();
-	auto &block = cif_file->GetBlock(first_block);
+	auto index = MmcifIndex::Load(file_name, &context);
+	vector<string> categories;
+	index->GetCategoryNames(categories);
 	for (auto &category : categories) {
-		auto &table = block.GetTable(category);
-		auto col_names = table.GetColumnNames();
-		for (auto &col : col_names) {
+		auto cat = index->FindCategory(category);
+		if (!cat) {
+			continue;
+		}
+		for (auto &col : cat->columns) {
 			auto type = DictionaryIndex::Get().LookupType(category, col);
 			vector<string> row = {category, col, type.ToString()};
 			result->rows.push_back(std::move(row));
@@ -438,7 +575,9 @@ static unique_ptr<FunctionData> MmcifRelationshipsBind(ClientContext &context, T
                                                        vector<LogicalType> &return_types, vector<string> &names) {
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto result = make_uniq<MmcifMetaBindData>();
-	auto categories = MmcifFileCategories(file_name, &context);
+	auto index = MmcifIndex::Load(file_name, &context);
+	vector<string> categories;
+	index->GetCategoryNames(categories);
 	case_insensitive_set_t present(categories.begin(), categories.end());
 	for (auto &rel : DictionaryIndex::Get().GetRelationships()) {
 		auto parent_item = MmcifSplitItem(rel.first);
@@ -469,6 +608,10 @@ class MmcifCatalog;
 static CifFile *MmcifResolveCifFile(MmcifCatalog *catalog, const string &file_name, unique_ptr<CifFile> &local,
                                     optional_ptr<ClientContext> context = nullptr);
 
+// Read-only lazy-index helpers (defined after MmcifCatalog is complete).
+static bool MmcifCatalogIsWrite(MmcifCatalog *catalog);
+static shared_ptr<MmcifIndex> MmcifCatalogGetIndex(MmcifCatalog *catalog, optional_ptr<ClientContext> context);
+
 // ---------------------------------------------------------------------------
 // MmcifTableEntry: a real TableCatalogEntry whose ColumnList carries dictionary
 // types (so DESCRIBE shows DOUBLE/BIGINT/VARCHAR) and whose GetScanFunction
@@ -488,42 +631,14 @@ public:
 	MmcifCatalog *catalog;
 
 	unique_ptr<BaseStatistics> GetStatistics(ClientContext &context, column_t column_id) override {
+		// Real min/max stats require a full category scan, which we deliberately
+		// avoid to keep LIMIT/schema queries cheap. Stats are skipped; the planner
+		// still gets exact cardinality from GetStorageInfo (recommendation 7).
 		return nullptr;
 	}
 
-	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) override {
-		auto result = make_uniq<MmcifBindData>();
-		result->file_name = file_name;
-		result->table_name = table_name;
-		result->table_entry = this;
-
-		unique_ptr<CifFile> local;
-		auto cif_p = MmcifResolveCifFile(catalog, file_name, local, &context);
-		string first_block;
-		auto &table = MmcifGetTable(*cif_p, table_name, first_block);
-		MmcifLoadRows(table, *result);
-		for (auto &col : result->column_names) {
-			result->column_types.push_back(DictionaryIndex::Get().LookupType(table_name, col));
-		}
-
-		bind_data = std::move(result);
-		auto scan_function = MmcifScanFunction();
-		// Expose the table entry so DELETE/UPDATE binder checks pass in write mode.
-		scan_function.get_bind_info = [](const optional_ptr<FunctionData> bind_data) -> BindInfo {
-			auto &bind = bind_data->Cast<MmcifBindData>();
-			if (!bind.table_entry) {
-				return BindInfo(ScanType::EXTERNAL);
-			}
-			return BindInfo(const_cast<TableCatalogEntry &>(*bind.table_entry));
-		};
-		return scan_function;
-	}
-
-	TableStorageInfo GetStorageInfo(ClientContext &context) override {
-		TableStorageInfo result;
-		result.cardinality = 10000;
-		return result;
-	}
+	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) override;
+	TableStorageInfo GetStorageInfo(ClientContext &context) override;
 };
 
 // ---------------------------------------------------------------------------
@@ -609,13 +724,24 @@ MmcifTableEntry &MmcifSchemaEntry::GetTableEntry(CatalogTransaction transaction,
 	auto &catalog = ParentCatalog();
 	CreateTableInfo info(*this, entry_name);
 	auto &dict = DictionaryIndex::Get();
-	unique_ptr<CifFile> local;
-	auto cif_p = MmcifResolveCifFile(this->catalog, file_name, local, transaction.context);
-	string first_block;
-	auto &table = MmcifGetTable(*cif_p, entry_name, first_block);
-	auto col_names = table.GetColumnNames();
-	for (auto &col : col_names) {
-		info.columns.AddColumn(ColumnDefinition(col, dict.LookupType(entry_name, col)));
+	if (MmcifCatalogIsWrite(this->catalog)) {
+		unique_ptr<CifFile> local;
+		auto cif_p = MmcifResolveCifFile(this->catalog, file_name, local, transaction.context);
+		string first_block;
+		auto &table = MmcifGetTable(*cif_p, entry_name, first_block);
+		for (auto &col : table.GetColumnNames()) {
+			info.columns.AddColumn(ColumnDefinition(col, dict.LookupType(entry_name, col)));
+		}
+	} else {
+		auto index = MmcifCatalogGetIndex(this->catalog, transaction.context);
+		auto cat = index->FindCategory(entry_name);
+		if (!cat) {
+			throw BinderException("mmcif: category '%s' not present in file '%s'", entry_name.c_str(),
+			                      file_name.c_str());
+		}
+		for (auto &col : cat->columns) {
+			info.columns.AddColumn(ColumnDefinition(col, dict.LookupType(entry_name, col)));
+		}
 	}
 	auto entry = make_uniq<MmcifTableEntry>(catalog, *this, info, file_name, entry_name, this->catalog);
 	auto *result = entry.get();
@@ -629,11 +755,16 @@ void MmcifSchemaEntry::Scan(ClientContext &context, CatalogType type,
 		return; // mmcif exposes only tables
 	}
 	vector<string> categories;
-	unique_ptr<CifFile> local;
-	auto cif_p = MmcifResolveCifFile(catalog, file_name, local, &context);
-	auto first_block = cif_p->GetFirstBlockName();
-	auto &block = cif_p->GetBlock(first_block);
-	block.GetTableNames(categories);
+	if (MmcifCatalogIsWrite(catalog)) {
+		unique_ptr<CifFile> local;
+		auto cif_p = MmcifResolveCifFile(catalog, file_name, local, &context);
+		auto first_block = cif_p->GetFirstBlockName();
+		auto &block = cif_p->GetBlock(first_block);
+		block.GetTableNames(categories);
+	} else {
+		auto index = MmcifCatalogGetIndex(catalog, &context);
+		index->GetCategoryNames(categories);
+	}
 	auto transaction = GetCatalogTransaction(context);
 	for (auto &category : categories) {
 		callback(GetTableEntry(transaction, category));
@@ -653,11 +784,18 @@ optional_ptr<CatalogEntry> MmcifSchemaEntry::LookupEntry(CatalogTransaction tran
 		return nullptr;
 	}
 	auto entry_name = lookup_info.GetEntryName();
-	unique_ptr<CifFile> local;
-	auto cif_p = MmcifResolveCifFile(catalog, file_name, local, transaction.context);
-	auto first_block = cif_p->GetFirstBlockName();
-	auto &block = cif_p->GetBlock(first_block);
-	if (!block.IsTablePresent(entry_name)) {
+	if (MmcifCatalogIsWrite(catalog)) {
+		unique_ptr<CifFile> local;
+		auto cif_p = MmcifResolveCifFile(catalog, file_name, local, transaction.context);
+		auto first_block = cif_p->GetFirstBlockName();
+		auto &block = cif_p->GetBlock(first_block);
+		if (!block.IsTablePresent(entry_name)) {
+			return nullptr;
+		}
+		return &GetTableEntry(transaction, entry_name);
+	}
+	auto index = MmcifCatalogGetIndex(catalog, transaction.context);
+	if (!index->FindCategory(entry_name)) {
 		return nullptr;
 	}
 	return &GetTableEntry(transaction, entry_name);
@@ -690,12 +828,27 @@ public:
 	string path;
 	bool write_mode;
 	unique_ptr<CifFile> cif_file;
+	// Read-only lazy index (recommendation 1): built on first resolve, then
+	// reused for every schema lookup, scan, and metadata query in this catalog.
+	// The process-level content cache (recommendation 2) lives in MmcifIndex::Load.
+	shared_ptr<MmcifIndex> index;
+	mutex index_lock;
 
 	bool IsWriteMode() const {
 		return write_mode;
 	}
 	CifFile *GetCifFile() {
 		return cif_file.get();
+	}
+	shared_ptr<MmcifIndex> GetIndex(optional_ptr<ClientContext> context) {
+		if (write_mode) {
+			return nullptr;
+		}
+		lock_guard<mutex> l(index_lock);
+		if (!index) {
+			index = MmcifIndex::Load(path, context);
+		}
+		return index;
 	}
 	// ROLLBACK: discard in-memory mutations by re-parsing the on-disk file.
 	void ReloadFromDisk() {
@@ -860,6 +1013,65 @@ private:
 	unique_ptr<MmcifSchemaEntry> main_schema;
 };
 
+TableFunction MmcifTableEntry::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
+	auto result = make_uniq<MmcifBindData>();
+	result->file_name = file_name;
+	result->table_name = table_name;
+	result->table_entry = this;
+
+	if (catalog->IsWriteMode()) {
+		// Write mode: materialized RCSB rows (DML mutates the persistent CifFile).
+		unique_ptr<CifFile> local;
+		auto cif_p = MmcifResolveCifFile(catalog, file_name, local, &context);
+		string first_block;
+		auto &table = MmcifGetTable(*cif_p, table_name, first_block);
+		MmcifLoadRows(table, *result);
+		for (auto &col : result->column_names) {
+			result->column_types.push_back(DictionaryIndex::Get().LookupType(table_name, col));
+		}
+	} else {
+		// Read-only: shared lazy index, streamed scan. No materialization.
+		auto index = catalog->GetIndex(&context);
+		auto cat = index->FindCategory(table_name);
+		if (!cat || cat->columns.empty()) {
+			throw BinderException("mmcif: category '%s' not present in file '%s'", table_name.c_str(),
+			                      file_name.c_str());
+		}
+		result->index = std::move(index);
+		result->category = cat;
+		result->column_names = cat->columns;
+		for (auto &col : result->column_names) {
+			result->column_types.push_back(DictionaryIndex::Get().LookupType(table_name, col));
+		}
+	}
+
+	bind_data = std::move(result);
+	auto scan_function = MmcifScanFunction();
+	// Expose the table entry so DELETE/UPDATE binder checks pass in write mode.
+	scan_function.get_bind_info = [](const optional_ptr<FunctionData> bind_data) -> BindInfo {
+		auto &bind = bind_data->Cast<MmcifBindData>();
+		if (!bind.table_entry) {
+			return BindInfo(ScanType::EXTERNAL);
+		}
+		return BindInfo(const_cast<TableCatalogEntry &>(*bind.table_entry));
+	};
+	return scan_function;
+}
+
+TableStorageInfo MmcifTableEntry::GetStorageInfo(ClientContext &context) {
+	TableStorageInfo result;
+	result.cardinality = 10000;
+	if (!catalog->IsWriteMode()) {
+		auto index = catalog->GetIndex(&context);
+		auto cat = index->FindCategory(table_name);
+		if (cat) {
+			// Exact cardinality, computed lazily once per category (cached).
+			result.cardinality = index->GetRowCount(*cat);
+		}
+	}
+	return result;
+}
+
 // ---------------------------------------------------------------------------
 // Resolve the CifFile to operate on. Write mode returns the catalog's single
 // persistent CifFile; read-only mode parses a fresh copy into `local` (kept
@@ -874,6 +1086,14 @@ static CifFile *MmcifResolveCifFile(MmcifCatalog *catalog, const string &file_na
 	string diags;
 	local = MmcifParseFile(file_name, diags, context);
 	return local.get();
+}
+
+static bool MmcifCatalogIsWrite(MmcifCatalog *catalog) {
+	return catalog->IsWriteMode();
+}
+
+static shared_ptr<MmcifIndex> MmcifCatalogGetIndex(MmcifCatalog *catalog, optional_ptr<ClientContext> context) {
+	return catalog->GetIndex(context);
 }
 
 // ---------------------------------------------------------------------------
