@@ -721,6 +721,15 @@ void MmcifSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 }
 
 MmcifTableEntry &MmcifSchemaEntry::GetTableEntry(CatalogTransaction transaction, const string &entry_name) {
+	// Cache: reuse an existing entry instead of replacing it. Scans keep a raw
+	// pointer to the returned MmcifTableEntry in their bind data; replacing the
+	// map entry would free that object while still referenced (e.g. a DELETE
+	// whose WHERE subquery scans the same table twice), leaving a dangling
+	// table_entry that segfaults the DELETE/UPDATE binder.
+	auto existing = tables.find(entry_name);
+	if (existing != tables.end()) {
+		return *existing->second;
+	}
 	auto &catalog = ParentCatalog();
 	CreateTableInfo info(*this, entry_name);
 	auto &dict = DictionaryIndex::Get();
