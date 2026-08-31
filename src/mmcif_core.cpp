@@ -179,8 +179,7 @@ static string MmcifReadFileContents(const string &file_name, optional_ptr<Client
 
 // Materialize the no-deps mutable write store for a file (gzip'd inputs are
 // decompressed by MmcifIndex::Load before the index is built).
-static unique_ptr<MmcifWriteStore> MmcifLoadWriteStore(const string &file_name,
-                                                       optional_ptr<ClientContext> context) {
+static unique_ptr<MmcifWriteStore> MmcifLoadWriteStore(const string &file_name, optional_ptr<ClientContext> context) {
 	auto index = MmcifIndex::Load(file_name, context);
 	auto store = MmcifWriteStore::FromIndex(*index);
 	return make_uniq<MmcifWriteStore>(std::move(*store));
@@ -211,33 +210,33 @@ enum MmcifIdentType { MM_NONE = 0, MM_LEFT, MM_RIGHT };
 
 static bool MmcifIsSpecialFirstChar(char c) {
 	switch (c) {
-		case '$':
-		case '#':
-		case '_':
-		case ';':
-		case '(':
-		case ')':
-		case '[':
-		case ']':
-		case '{':
-		case '}':
-			return true;
-		default:
-			return false;
+	case '$':
+	case '#':
+	case '_':
+	case ';':
+	case '(':
+	case ')':
+	case '[':
+	case ']':
+	case '{':
+	case '}':
+		return true;
+	default:
+		return false;
 	}
 }
 
 static bool MmcifIsSpecialChar(char c) {
 	switch (c) {
-		case '(':
-		case ')':
-		case '[':
-		case ']':
-		case '{':
-		case '}':
-			return true;
-		default:
-			return false;
+	case '(':
+	case ')':
+	case '[':
+	case ']':
+	case '{':
+	case '}':
+		return true;
+	default:
+		return false;
 	}
 }
 
@@ -289,7 +288,8 @@ static bool MmcifIsQuotableText(const string &itemValue) {
 // the stream, tracking the current line position; returns nothing (the RCSB
 // return value is only used by smart-print header logic).
 static void MmcifPrintItemValue(std::ostream &cifo, const string &itemValue, idx_t &linePos, MmcifIdentType identType,
-                                unsigned int width, const string &nullValue, const string &quotes, bool noWrap = false) {
+                                unsigned int width, const string &nullValue, const string &quotes,
+                                bool noWrap = false) {
 	string Ident;
 	if (identType == MM_NONE && width != 0) {
 		Ident = "          ";
@@ -387,9 +387,8 @@ static void MmcifPrintItemValue(std::ostream &cifo, const string &itemValue, idx
 		cifo << ";" << itemValue << "\n;\n";
 		linePos = 0;
 	} else {
-		if (!noWrap &&
-		    ((!multipleWord && str_len + 2 + linePos > MM_CIF_LINE_LENGTH) ||
-		     (multipleWord && str_len + 4 + linePos > MM_CIF_LINE_LENGTH))) {
+		if (!noWrap && ((!multipleWord && str_len + 2 + linePos > MM_CIF_LINE_LENGTH) ||
+		                (multipleWord && str_len + 4 + linePos > MM_CIF_LINE_LENGTH))) {
 			cifo << "\n";
 			linePos = 0;
 			cifo << Ident;
@@ -476,8 +475,8 @@ static void MmcifWriteCif(std::ostream &cifo, const MmcifWriteStore &store) {
 					cifo << " ";
 				}
 				linePos += numSpaces;
-			linePos = longestCifItem.size() + MM_STD_PRINT_SPACING - 1;
-			MmcifPrintItemValue(cifo, rowValues[i], linePos, MM_NONE, 0, nullValue, quotes, true);
+				linePos = longestCifItem.size() + MM_STD_PRINT_SPACING - 1;
+				MmcifPrintItemValue(cifo, rowValues[i], linePos, MM_NONE, 0, nullValue, quotes, true);
 				if (linePos != 0) {
 					cifo << "\n";
 				}
@@ -1477,7 +1476,8 @@ public:
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override {
 		return make_uniq<GlobalSourceState>();
 	}
-	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk, OperatorSourceInput &input) const override {
+	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                 OperatorSourceInput &input) const override {
 		auto &g = sink_state->Cast<MmcifWriteGlobalState>();
 		chunk.SetCardinality(1);
 		chunk.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(g.count)));
@@ -1546,7 +1546,8 @@ public:
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override {
 		return make_uniq<GlobalSourceState>();
 	}
-	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk, OperatorSourceInput &input) const override {
+	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                 OperatorSourceInput &input) const override {
 		auto &g = sink_state->Cast<MmcifWriteGlobalState>();
 		chunk.SetCardinality(1);
 		chunk.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(g.count)));
@@ -1608,7 +1609,8 @@ public:
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override {
 		return make_uniq<GlobalSourceState>();
 	}
-	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk, OperatorSourceInput &input) const override {
+	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                 OperatorSourceInput &input) const override {
 		auto &g = sink_state->Cast<MmcifWriteGlobalState>();
 		chunk.SetCardinality(1);
 		chunk.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(g.count)));
@@ -1622,7 +1624,8 @@ public:
 
 class MmcifTransactionManager : public TransactionManager {
 public:
-	MmcifTransactionManager(AttachedDatabase &db, MmcifCatalog &catalog_p) : TransactionManager(db), catalog(catalog_p) {
+	MmcifTransactionManager(AttachedDatabase &db, MmcifCatalog &catalog_p)
+	    : TransactionManager(db), catalog(catalog_p) {
 	}
 
 	MmcifCatalog &catalog;
@@ -1701,8 +1704,7 @@ static unique_ptr<Catalog> MmcifAttach(optional_ptr<StorageExtensionInfo> storag
 	// system and cannot be rewritten in place, so they are always read-only.
 	if (write_mode && MmcifIsRemotePath(info.path)) {
 		throw InvalidInputException(
-		    "mmcif: remote file '%s' cannot be attached with READ_WRITE - remote mmcif files are read-only",
-		    info.path);
+		    "mmcif: remote file '%s' cannot be attached with READ_WRITE - remote mmcif files are read-only", info.path);
 	}
 	return make_uniq<MmcifCatalog>(db, info.path, write_mode);
 }

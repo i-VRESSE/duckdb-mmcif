@@ -39,8 +39,7 @@ namespace duckdb {
 
 class MmcifValueCursor {
 public:
-	MmcifValueCursor(const char *base_p, idx_t start_p, idx_t end_p)
-	    : base(base_p), end(end_p), pos(start_p) {
+	MmcifValueCursor(const char *base_p, idx_t start_p, idx_t end_p) : base(base_p), end(end_p), pos(start_p) {
 	}
 
 	// Parse the next value. Returns false when the range is exhausted.
@@ -152,10 +151,10 @@ struct MmcifCategory {
 	string name;
 	vector<string> columns; // item names, in first-seen order
 	bool is_loop = false;
-	vector<idx_t> loop_col_map; // loop position -> full column index (loop categories)
-	vector<bool> is_loop_col;   // parallel to columns: true if the column comes from the loop
-	idx_t data_start = 0;       // byte offset of loop data start (loop categories)
-	idx_t data_end = 0;         // byte offset past loop data end (exclusive)
+	vector<idx_t> loop_col_map;      // loop position -> full column index (loop categories)
+	vector<bool> is_loop_col;        // parallel to columns: true if the column comes from the loop
+	idx_t data_start = 0;            // byte offset of loop data start (loop categories)
+	idx_t data_end = 0;              // byte offset past loop data end (exclusive)
 	vector<MmcifSingleCell> singles; // single-tag cells, keyed by full column index
 
 	std::atomic<idx_t> row_count = {idx_t(-1)}; // -1 == unknown (computed lazily)
@@ -193,13 +192,13 @@ public:
 	}
 
 private:
-	MmcifIndex(string raw_p, string text_p) : raw(std::move(raw_p)), text(std::move(text_p)),
-	                                          content_data(text.data()), content_size(text.size()) {
+	MmcifIndex(string raw_p, string text_p)
+	    : raw(std::move(raw_p)), text(std::move(text_p)), content_data(text.data()), content_size(text.size()) {
 	}
 	void Build();
 
-	string raw;        // compressed bytes (kept for cache invalidation checks)
-	string text;       // decompressed mmCIF text (the flat string arena)
+	string raw;  // compressed bytes (kept for cache invalidation checks)
+	string text; // decompressed mmCIF text (the flat string arena)
 	const char *content_data;
 	idx_t content_size;
 
@@ -223,7 +222,7 @@ private:
 struct MmcifWriteCategory {
 	string name;
 	bool is_loop = false;
-	std::vector<std::string> columns;       // item names, in first-seen order
+	std::vector<std::string> columns;           // item names, in first-seen order
 	std::vector<std::vector<std::string>> rows; // row-major cell strings, one per column
 };
 

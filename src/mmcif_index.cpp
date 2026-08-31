@@ -450,8 +450,8 @@ static string MmcifDecodeValue(const char *p, idx_t len) {
 		idx_t start = 1;
 		idx_t end = len;
 		string val(p + start, end - start);
-		while (!val.empty() && (val.back() == ' ' || val.back() == '\t' || val.back() == '\n' ||
-		                        val.back() == '\r' || val.back() == ';')) {
+		while (!val.empty() && (val.back() == ' ' || val.back() == '\t' || val.back() == '\n' || val.back() == '\r' ||
+		                        val.back() == ';')) {
 			val.pop_back();
 		}
 		return val;
