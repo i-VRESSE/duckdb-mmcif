@@ -7,3 +7,11 @@ testext
 test/python/__pycache__/
 .Rhistory
 .cache
+
+# For https://github.com/mattpocock/skills
+.agents/
+.scratch/
+docs/agents/
+AGENTS.md
+skills-lock.json
+
