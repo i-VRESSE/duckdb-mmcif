@@ -46,13 +46,6 @@
 #include <fstream>
 #include <sstream>
 
-// RCSB mmcif core (vendored submodules under modules/)
-#include "CifFile.h"
-#include "CifParserBase.h"
-#include "ISTable.h"
-#include "TableFile.h"
-#include "CifString.h"
-
 #include "mmcif_index.hpp"
 
 #include "mmcif_dict_data.hpp" // embedded gzip'd dictionary artifacts (CMake)
@@ -142,9 +135,8 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// CifFile parsing helpers (prototype quirks, issue 05): append a dummy trailing
-// data block so the RCSB parser flushes any pending "last loop" table, then
-// keep only the FIRST data block (issue 04).
+// Write-store loader: materialize the first data block into a mutable
+// MmcifWriteStore (single data block kept, per issue 04).
 // ---------------------------------------------------------------------------
 
 // Returns true for paths that reference a remote resource (http/https URL,
@@ -185,33 +177,350 @@ static string MmcifReadFileContents(const string &file_name, optional_ptr<Client
 	return ss.str();
 }
 
-static unique_ptr<CifFile> MmcifParseFile(const string &file_name, string &diags,
-                                          optional_ptr<ClientContext> context = nullptr) {
-	auto cif_file = make_uniq<CifFile>(true); // virtual-mode ctor, no sdb backing file
-	string content = MmcifReadFileContents(file_name, context);
-	// gzip'd mmcif files (e.g. https://files.rcsb.org/download/1AMB.cif.gz) are
-	// detected by magic bytes and decompressed before parsing.
-	if (GZipFileSystem::CheckIsZip(content.data(), content.size())) {
-		content = GZipFileSystem::UncompressGZIPString(content);
-	}
-	content += "\ndata_zzz_prototype\n#\n";
-	CifParser parser(cif_file.get(), CifFileReadDef(), cif_file->GetVerbose());
-	parser.ParseString(content, diags);
-	return cif_file;
+// Materialize the no-deps mutable write store for a file (gzip'd inputs are
+// decompressed by MmcifIndex::Load before the index is built).
+static unique_ptr<MmcifWriteStore> MmcifLoadWriteStore(const string &file_name,
+                                                       optional_ptr<ClientContext> context) {
+	auto index = MmcifIndex::Load(file_name, context);
+	auto store = MmcifWriteStore::FromIndex(*index);
+	return make_uniq<MmcifWriteStore>(std::move(*store));
 }
 
-static ISTable &MmcifGetTable(CifFile &cif_file, const string &table_name, string &first_block) {
-	first_block = cif_file.GetFirstBlockName();
-	auto &block = cif_file.GetBlock(first_block);
-	if (!block.IsTablePresent(table_name)) {
+// Resolve a category in the write store; throws if absent or column-less.
+static MmcifWriteCategory *MmcifGetWriteCategory(MmcifWriteStore &store, const string &table_name) {
+	auto cat = store.FindCategory(table_name);
+	if (!cat || cat->columns.empty()) {
 		throw BinderException("mmcif: category '%s' not present in block '%s'", table_name.c_str(),
-		                      first_block.c_str());
+		                      store.data_block_name.c_str());
 	}
-	auto &table = block.GetTable(table_name);
-	if (table.GetColumnNames().empty()) {
-		throw BinderException("mmcif: category '%s' has no columns", table_name.c_str());
+	return cat;
+}
+
+// ---------------------------------------------------------------------------
+// No-deps CIF writer (replaces RCSB CifFile::Write). Emulates the RCSB
+// non-smart-print path exactly: 80-column wrap, '?' for null cells, single/double
+// quote selection, and ';...;' text-quotes for multi-line / long values. The
+// write store stores cells in the RCSB parser's forms (".", "?", unquoted), so
+// emit is byte-compatible with the old write-back.
+// ---------------------------------------------------------------------------
+
+static const unsigned int MM_CIF_LINE_LENGTH = 80;
+static const unsigned int MM_STD_PRINT_SPACING = 3;
+
+enum MmcifIdentType { MM_NONE = 0, MM_LEFT, MM_RIGHT };
+
+static bool MmcifIsSpecialFirstChar(char c) {
+	switch (c) {
+		case '$':
+		case '#':
+		case '_':
+		case ';':
+		case '(':
+		case ')':
+		case '[':
+		case ']':
+		case '{':
+		case '}':
+			return true;
+		default:
+			return false;
 	}
-	return table;
+}
+
+static bool MmcifIsSpecialChar(char c) {
+	switch (c) {
+		case '(':
+		case ')':
+		case '[':
+		case ']':
+		case '{':
+		case '}':
+			return true;
+		default:
+			return false;
+	}
+}
+
+// Case-insensitive prefix compare (replaces String::IsCiEqual on the keywords).
+static bool MmcifIsCiPrefix(const string &s, const char *word) {
+	size_t n = strlen(word);
+	if (s.size() < n) {
+		return false;
+	}
+	for (size_t i = 0; i < n; i++) {
+		if (tolower(static_cast<unsigned char>(s[i])) != tolower(static_cast<unsigned char>(word[i]))) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool MmcifIsQuotableText(const string &itemValue) {
+	if (itemValue.empty()) {
+		return false;
+	}
+	if (itemValue[0] == '_') {
+		return true;
+	}
+	for (idx_t i = 0; i < itemValue.size(); i++) {
+		char c = itemValue[i];
+		if (c == ' ' || c == '\t' || c == '\n' || c == '\'' || c == '\"') {
+			return true;
+		}
+		if (i == 0) {
+			if (MmcifIsSpecialFirstChar(c)) {
+				return true;
+			}
+		} else {
+			if (MmcifIsSpecialChar(c)) {
+				return true;
+			}
+		}
+	}
+	if (MmcifIsCiPrefix(itemValue, "data_") || MmcifIsCiPrefix(itemValue, "loop_") ||
+	    MmcifIsCiPrefix(itemValue, "save_") || MmcifIsCiPrefix(itemValue, "stop_") ||
+	    MmcifIsCiPrefix(itemValue, "global_")) {
+		return true;
+	}
+	return false;
+}
+
+// Port of CifFile::_PrintItemValue (non-smart path). Writes one cell value to
+// the stream, tracking the current line position; returns nothing (the RCSB
+// return value is only used by smart-print header logic).
+static void MmcifPrintItemValue(std::ostream &cifo, const string &itemValue, idx_t &linePos, MmcifIdentType identType,
+                                unsigned int width, const string &nullValue, const string &quotes, bool noWrap = false) {
+	string Ident;
+	if (identType == MM_NONE && width != 0) {
+		Ident = "          ";
+	}
+	if (linePos == 0) {
+		cifo << Ident;
+		linePos = Ident.size();
+	}
+	if (itemValue.empty()) {
+		if (MM_CIF_LINE_LENGTH <= linePos + 2) {
+			cifo << "\n";
+			linePos = 0;
+		}
+		idx_t N = nullValue.size();
+		if (identType == MM_RIGHT) {
+			if (linePos + width - N < MM_CIF_LINE_LENGTH) {
+				for (idx_t k = 0; k < width - N; k++) {
+					cifo << " ";
+				}
+				linePos += width - N;
+			}
+		}
+		cifo << nullValue;
+		linePos += 1;
+		if (identType == MM_LEFT) {
+			if (linePos != 0 && linePos + width - N < MM_CIF_LINE_LENGTH) {
+				for (idx_t k = 0; k < width - N; k++) {
+					cifo << " ";
+				}
+				linePos += width - N;
+			}
+		}
+		cifo << " ";
+		linePos += 1;
+		return;
+	}
+
+	idx_t str_len = itemValue.size();
+	bool multipleLine = false;
+	bool multipleWord = false;
+	bool embeddedQuotes = false;
+	bool embeddedSingleQuotes = false;
+	bool embeddedDoubleQuotes = false;
+	bool specialChars = false;
+	string multipleWordQuotes = quotes;
+
+	for (idx_t i = 0; i < str_len; i++) {
+		char c = itemValue[i];
+		if (c == ' ' || c == '\t') {
+			multipleWord = true;
+		} else if (c == '\n') {
+			multipleLine = true;
+		} else if (c == '\'') {
+			embeddedSingleQuotes = true;
+			embeddedQuotes = true;
+			multipleWordQuotes = "\"";
+		} else if (c == '\"') {
+			embeddedDoubleQuotes = true;
+			embeddedQuotes = true;
+			multipleWordQuotes = "\'";
+		} else if (!specialChars) {
+			if (i == 0 && MmcifIsSpecialFirstChar(c)) {
+				specialChars = true;
+			}
+			if (i != 0 && MmcifIsSpecialChar(c)) {
+				specialChars = true;
+			}
+		}
+	}
+	if (itemValue[0] == '_' || itemValue[0] == ';') {
+		multipleWord = true;
+	}
+	if (MmcifIsCiPrefix(itemValue, "data_") || MmcifIsCiPrefix(itemValue, "loop_") ||
+	    MmcifIsCiPrefix(itemValue, "save_") || MmcifIsCiPrefix(itemValue, "stop_") ||
+	    MmcifIsCiPrefix(itemValue, "global_")) {
+		multipleWord = true;
+	}
+	if (embeddedQuotes && multipleWord) {
+		multipleLine = true;
+	}
+	if (embeddedQuotes) {
+		multipleWord = true;
+	}
+	if (specialChars) {
+		multipleWord = true;
+	}
+	if (embeddedSingleQuotes && embeddedDoubleQuotes) {
+		multipleWordQuotes = quotes;
+	}
+
+	if (str_len >= MM_CIF_LINE_LENGTH || multipleLine) {
+		if (linePos != 0 && !noWrap) {
+			cifo << "\n";
+		}
+		cifo << ";" << itemValue << "\n;\n";
+		linePos = 0;
+	} else {
+		if (!noWrap &&
+		    ((!multipleWord && str_len + 2 + linePos > MM_CIF_LINE_LENGTH) ||
+		     (multipleWord && str_len + 4 + linePos > MM_CIF_LINE_LENGTH))) {
+			cifo << "\n";
+			linePos = 0;
+			cifo << Ident;
+			linePos += Ident.size();
+		}
+		string fullItemValue;
+		if (multipleWord) {
+			fullItemValue = multipleWordQuotes + itemValue + multipleWordQuotes;
+		} else {
+			fullItemValue = itemValue;
+		}
+		idx_t N = fullItemValue.size();
+		if (identType == MM_RIGHT) {
+			if (linePos + width - N < MM_CIF_LINE_LENGTH) {
+				for (idx_t k = 0; k < width - N; k++) {
+					cifo << " ";
+				}
+				linePos += width - N;
+			}
+		}
+		cifo << fullItemValue;
+		linePos += N;
+		if (identType == MM_NONE || identType == MM_LEFT) {
+			cifo << " ";
+			linePos++;
+		}
+		if (identType == MM_NONE && !Ident.empty()) {
+			if (linePos > Ident.size()) {
+				linePos = linePos + width - N;
+				for (idx_t i = 0; i < width - N; i++) {
+					cifo << " ";
+				}
+			}
+		}
+		if (identType == MM_LEFT) {
+			if (linePos != 0 && linePos + width - N < MM_CIF_LINE_LENGTH) {
+				for (idx_t k = 0; k < width - N; k++) {
+					cifo << " ";
+				}
+				linePos += width - N;
+			}
+		}
+		if (identType == MM_RIGHT) {
+			cifo << " ";
+			linePos++;
+		}
+	}
+}
+
+// Port of CifFile::Write(ostream, tables, writeEmptyTables=false) with
+// smartPrint disabled. Emits one data block (the write store keeps only the
+// first data block), skipping empty categories.
+static void MmcifWriteCif(std::ostream &cifo, const MmcifWriteStore &store) {
+	const string nullValue = "?";
+	const string quotes = "\'";
+
+	cifo << "data_" << store.data_block_name << "\n";
+	for (auto &cat : store.categories) {
+		idx_t numRow = cat.rows.size();
+		idx_t numColumn = cat.columns.size();
+		if (numRow == 0) {
+			continue; // writeEmptyTables=false
+		}
+		cifo << "# \n";
+		if (numRow <= 1 && !cat.is_loop) {
+			// Single-row category: item/value pairs, aligned to the longest item.
+			idx_t longestNameIndex = 0;
+			idx_t cwid = 0;
+			for (idx_t i = 0; i < numColumn; i++) {
+				if (cat.columns[i].size() > cwid) {
+					cwid = cat.columns[i].size();
+					longestNameIndex = i;
+				}
+			}
+			string longestCifItem = "_" + cat.name + "." + cat.columns[longestNameIndex];
+			const std::vector<std::string> &rowValues = cat.rows[0];
+			for (idx_t i = 0; i < numColumn; i++) {
+				idx_t linePos = 0;
+				string cifItem = "_" + cat.name + "." + cat.columns[i];
+				cifo << cifItem;
+				linePos += cifItem.size();
+				idx_t numSpaces = MM_STD_PRINT_SPACING + cat.columns[longestNameIndex].size() - cat.columns[i].size();
+				for (idx_t k = 0; k < numSpaces; k++) {
+					cifo << " ";
+				}
+				linePos += numSpaces;
+			linePos = longestCifItem.size() + MM_STD_PRINT_SPACING - 1;
+			MmcifPrintItemValue(cifo, rowValues[i], linePos, MM_NONE, 0, nullValue, quotes, true);
+				if (linePos != 0) {
+					cifo << "\n";
+				}
+			}
+		} else {
+			// Loop category.
+			cifo << "loop_\n";
+			for (idx_t i = 0; i < numColumn; i++) {
+				idx_t linePos = 0;
+				string cifItem = "_" + cat.name + "." + cat.columns[i];
+				cifo << cifItem;
+				linePos += cifItem.size();
+				cifo << " ";
+				linePos += 1;
+				cifo << "\n";
+			}
+			vector<idx_t> cwidth(numColumn, 1);
+			for (idx_t l = 0; l < numRow; l++) {
+				const auto &row = cat.rows[l];
+				for (idx_t i = 0; i < numColumn; i++) {
+					idx_t ilen = row[i].size();
+					if (MmcifIsQuotableText(row[i])) {
+						ilen += 2;
+					}
+					if (ilen > cwidth[i]) {
+						cwidth[i] = ilen;
+					}
+				}
+			}
+			for (idx_t l = 0; l < numRow; l++) {
+				const auto &row = cat.rows[l];
+				idx_t linePos = 0;
+				for (idx_t i = 0; i < numColumn; i++) {
+					MmcifPrintItemValue(cifo, row[i], linePos, MM_LEFT, NumericCast<unsigned int>(cwidth[i]), nullValue,
+					                    quotes);
+				}
+				if (linePos != 0) {
+					cifo << "\n";
+				}
+			}
+		}
+	}
+	cifo << "# \n";
 }
 
 // ---------------------------------------------------------------------------
@@ -252,8 +561,8 @@ struct MmcifBindData : public FunctionData {
 	}
 
 	static bool IsNullCell(const string &v) {
-		// CifString::IsEmptyValue is true for "", ".", "?"
-		return CifString::IsEmptyValue(v);
+		// A cell is NULL when it is empty, ".", or "?" (the RCSB stored forms).
+		return v.empty() || v == "." || v == "?";
 	}
 };
 
@@ -296,12 +605,9 @@ struct MmcifGlobalState : public GlobalTableFunctionState {
 	}
 };
 
-static void MmcifLoadRows(ISTable &table, MmcifBindData &result) {
-	result.column_names = table.GetColumnNames();
-	idx_t num_rows = table.GetNumRows();
-	for (idx_t r = 0; r < num_rows; r++) {
-		result.rows.push_back(table.GetRow(r));
-	}
+static void MmcifLoadRows(MmcifWriteCategory *cat, MmcifBindData &result) {
+	result.column_names = cat->columns;
+	result.rows = cat->rows; // row-major snapshot (DML mutates the store, not this copy)
 }
 
 static void MmcifLoadIndex(MmcifBindData &result, shared_ptr<MmcifIndex> index, const string &table_name,
@@ -600,17 +906,16 @@ static unique_ptr<FunctionData> MmcifRelationshipsBind(ClientContext &context, T
 
 // ---------------------------------------------------------------------------
 // MmcifCatalog is defined later in this file; schema/table entries hold a
-// pointer to it so write mode can reach the single persistent CifFile.
+// pointer to it so write mode can reach the single persistent write store.
 // ---------------------------------------------------------------------------
 class MmcifCatalog;
 
-// Resolve the CifFile to operate on (defined after MmcifCatalog is complete).
-static CifFile *MmcifResolveCifFile(MmcifCatalog *catalog, const string &file_name, unique_ptr<CifFile> &local,
-                                    optional_ptr<ClientContext> context = nullptr);
-
-// Read-only lazy-index helpers (defined after MmcifCatalog is complete).
+// Catalog helpers (defined after MmcifCatalog is complete).
 static bool MmcifCatalogIsWrite(MmcifCatalog *catalog);
 static shared_ptr<MmcifIndex> MmcifCatalogGetIndex(MmcifCatalog *catalog, optional_ptr<ClientContext> context);
+static MmcifWriteStore *MmcifCatalogGetWriteStore(MmcifCatalog *catalog);
+static std::vector<std::string> MmcifCatalogGetCategoryNames(MmcifCatalog *catalog);
+static bool MmcifCatalogFindCategory(MmcifCatalog *catalog, const string &name);
 
 // ---------------------------------------------------------------------------
 // MmcifTableEntry: a real TableCatalogEntry whose ColumnList carries dictionary
@@ -734,11 +1039,9 @@ MmcifTableEntry &MmcifSchemaEntry::GetTableEntry(CatalogTransaction transaction,
 	CreateTableInfo info(*this, entry_name);
 	auto &dict = DictionaryIndex::Get();
 	if (MmcifCatalogIsWrite(this->catalog)) {
-		unique_ptr<CifFile> local;
-		auto cif_p = MmcifResolveCifFile(this->catalog, file_name, local, transaction.context);
-		string first_block;
-		auto &table = MmcifGetTable(*cif_p, entry_name, first_block);
-		for (auto &col : table.GetColumnNames()) {
+		auto store = MmcifCatalogGetWriteStore(this->catalog);
+		auto cat = MmcifGetWriteCategory(*store, entry_name);
+		for (auto &col : cat->columns) {
 			info.columns.AddColumn(ColumnDefinition(col, dict.LookupType(entry_name, col)));
 		}
 	} else {
@@ -765,11 +1068,7 @@ void MmcifSchemaEntry::Scan(ClientContext &context, CatalogType type,
 	}
 	vector<string> categories;
 	if (MmcifCatalogIsWrite(catalog)) {
-		unique_ptr<CifFile> local;
-		auto cif_p = MmcifResolveCifFile(catalog, file_name, local, &context);
-		auto first_block = cif_p->GetFirstBlockName();
-		auto &block = cif_p->GetBlock(first_block);
-		block.GetTableNames(categories);
+		categories = MmcifCatalogGetCategoryNames(catalog);
 	} else {
 		auto index = MmcifCatalogGetIndex(catalog, &context);
 		index->GetCategoryNames(categories);
@@ -794,11 +1093,7 @@ optional_ptr<CatalogEntry> MmcifSchemaEntry::LookupEntry(CatalogTransaction tran
 	}
 	auto entry_name = lookup_info.GetEntryName();
 	if (MmcifCatalogIsWrite(catalog)) {
-		unique_ptr<CifFile> local;
-		auto cif_p = MmcifResolveCifFile(catalog, file_name, local, transaction.context);
-		auto first_block = cif_p->GetFirstBlockName();
-		auto &block = cif_p->GetBlock(first_block);
-		if (!block.IsTablePresent(entry_name)) {
+		if (!MmcifCatalogFindCategory(catalog, entry_name)) {
 			return nullptr;
 		}
 		return &GetTableEntry(transaction, entry_name);
@@ -812,8 +1107,8 @@ optional_ptr<CatalogEntry> MmcifSchemaEntry::LookupEntry(CatalogTransaction tran
 
 // ---------------------------------------------------------------------------
 // MmcifCatalog: SQLite-style custom Catalog. Single "main" schema. Read-only
-// by default; opened with READ_WRITE TRUE it owns one persistent CifFile that
-// DML operators mutate and COMMIT/detach write back.
+// by default; opened with READ_WRITE TRUE it owns one persistent
+// MmcifWriteStore that DML operators mutate and COMMIT/detach write back.
 //
 // The write-mode DML operators are defined after this class; the catalog's
 // PlanInsert/PlanDelete/PlanUpdate member bodies instantiate them lazily, so
@@ -829,14 +1124,14 @@ public:
 	MmcifCatalog(AttachedDatabase &db_p, string path_p, bool write_mode_p)
 	    : Catalog(db_p), path(std::move(path_p)), write_mode(write_mode_p) {
 		if (write_mode) {
-			string diags;
-			cif_file = MmcifParseFile(path, diags);
+			write_store = MmcifLoadWriteStore(path, nullptr);
 		}
 	}
 
 	string path;
 	bool write_mode;
-	unique_ptr<CifFile> cif_file;
+	// No-deps mutable write store (replaces the RCSB CifFile/ISTable core).
+	unique_ptr<MmcifWriteStore> write_store;
 	// Read-only lazy index (recommendation 1): built on first resolve, then
 	// reused for every schema lookup, scan, and metadata query in this catalog.
 	// The process-level content cache (recommendation 2) lives in MmcifIndex::Load.
@@ -846,8 +1141,8 @@ public:
 	bool IsWriteMode() const {
 		return write_mode;
 	}
-	CifFile *GetCifFile() {
-		return cif_file.get();
+	MmcifWriteStore *GetWriteStore() {
+		return write_store.get();
 	}
 	shared_ptr<MmcifIndex> GetIndex(optional_ptr<ClientContext> context) {
 		if (write_mode) {
@@ -859,29 +1154,28 @@ public:
 		}
 		return index;
 	}
-	// ROLLBACK: discard in-memory mutations by re-parsing the on-disk file.
+	// ROLLBACK: discard in-memory mutations by re-materializing from disk.
 	void ReloadFromDisk() {
 		if (!write_mode) {
 			return;
 		}
-		string diags;
-		cif_file = MmcifParseFile(path, diags);
+		write_store = MmcifLoadWriteStore(path, nullptr);
 	}
-	// COMMIT / detach / checkpoint: write the in-memory CifFile back to disk.
+	// COMMIT / detach / checkpoint: write the in-memory store back to disk.
 	// Paths ending in .gz are written back gzip-compressed (the read path
 	// auto-decompresses them, so writing plain text would break the round-trip).
 	void Persist(ClientContext &context) {
-		if (!write_mode || !cif_file) {
+		if (!write_mode || !write_store) {
 			return;
 		}
 		if (MmcifIsRemotePath(path)) {
 			throw IOException("mmcif: cannot write back to remote path %s - remote files are read-only", path);
 		}
 		if (StringUtil::EndsWith(StringUtil::Lower(path), ".gz")) {
-			// CifFile::Write always emits plain text; run it through DuckDB's
+			// MmcifWriteCif always emits plain text; run it through DuckDB's
 			// gzip compression stream so the .cif.gz round-trips correctly.
 			std::ostringstream ss;
-			cif_file->Write(ss);
+			MmcifWriteCif(ss, *write_store);
 			auto content = ss.str();
 			auto &fs = FileSystem::GetFileSystem(context);
 			FileOpenFlags flags = FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW;
@@ -893,7 +1187,9 @@ public:
 			// Closing the handle flushes the gzip footer (deflate stream end).
 			handle->Close();
 		} else {
-			cif_file->Write(path);
+			std::ofstream ofs(path.c_str(), std::ios::out | std::ios::trunc);
+			MmcifWriteCif(ofs, *write_store);
+			ofs.close();
 		}
 	}
 
@@ -1029,12 +1325,10 @@ TableFunction MmcifTableEntry::GetScanFunction(ClientContext &context, unique_pt
 	result->table_entry = this;
 
 	if (catalog->IsWriteMode()) {
-		// Write mode: materialized RCSB rows (DML mutates the persistent CifFile).
-		unique_ptr<CifFile> local;
-		auto cif_p = MmcifResolveCifFile(catalog, file_name, local, &context);
-		string first_block;
-		auto &table = MmcifGetTable(*cif_p, table_name, first_block);
-		MmcifLoadRows(table, *result);
+		// Write mode: materialized store rows (DML mutates the persistent store).
+		auto store = catalog->GetWriteStore();
+		auto cat = MmcifGetWriteCategory(*store, table_name);
+		MmcifLoadRows(cat, *result);
 		for (auto &col : result->column_names) {
 			result->column_types.push_back(DictionaryIndex::Get().LookupType(table_name, col));
 		}
@@ -1081,22 +1375,6 @@ TableStorageInfo MmcifTableEntry::GetStorageInfo(ClientContext &context) {
 	return result;
 }
 
-// ---------------------------------------------------------------------------
-// Resolve the CifFile to operate on. Write mode returns the catalog's single
-// persistent CifFile; read-only mode parses a fresh copy into `local` (kept
-// alive by the caller).
-// ---------------------------------------------------------------------------
-static CifFile *MmcifResolveCifFile(MmcifCatalog *catalog, const string &file_name, unique_ptr<CifFile> &local,
-                                    optional_ptr<ClientContext> context) {
-	auto persistent = catalog->GetCifFile();
-	if (persistent) {
-		return persistent;
-	}
-	string diags;
-	local = MmcifParseFile(file_name, diags, context);
-	return local.get();
-}
-
 static bool MmcifCatalogIsWrite(MmcifCatalog *catalog) {
 	return catalog->IsWriteMode();
 }
@@ -1105,10 +1383,22 @@ static shared_ptr<MmcifIndex> MmcifCatalogGetIndex(MmcifCatalog *catalog, option
 	return catalog->GetIndex(context);
 }
 
+static MmcifWriteStore *MmcifCatalogGetWriteStore(MmcifCatalog *catalog) {
+	return catalog->GetWriteStore();
+}
+
+static std::vector<std::string> MmcifCatalogGetCategoryNames(MmcifCatalog *catalog) {
+	return catalog->GetWriteStore()->GetCategoryNames();
+}
+
+static bool MmcifCatalogFindCategory(MmcifCatalog *catalog, const string &name) {
+	return catalog->GetWriteStore()->FindCategory(name) != nullptr;
+}
+
 // ---------------------------------------------------------------------------
 // Write-mode DML operators (D3): custom physical sinks that read the input
-// chunk and apply row-level mutations to the catalog's persistent CifFile.
-// row_id == physical ISTable row index (scans emit row_id = row index).
+// chunk and apply row-level mutations to the catalog's persistent write store.
+// row_id == physical store row index (scans emit row_id = row index).
 // ---------------------------------------------------------------------------
 
 struct MmcifWriteGlobalState : public GlobalSinkState {
@@ -1117,7 +1407,7 @@ struct MmcifWriteGlobalState : public GlobalSinkState {
 	// DELETE row ids are accumulated across sink chunks and applied once in Combine:
 	// row ids refer to positions in the table as it was when the scan started, so
 	// applying them chunk-by-chunk would use stale indices after the first shrink.
-	vector<unsigned int> delete_indices;
+	std::vector<unsigned int> delete_indices;
 };
 
 static string MmcifCellToString(const Vector &vec, idx_t row) {
@@ -1161,11 +1451,9 @@ public:
 	}
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override {
 		auto &gstate = input.global_state.Cast<MmcifWriteGlobalState>();
-		auto &cif = *catalog.GetCifFile();
-		string first_block;
-		auto &table = MmcifGetTable(cif, table_name, first_block);
-		auto col_names = table.GetColumnNames();
-		idx_t num_cols = col_names.size();
+		auto store = catalog.GetWriteStore();
+		auto cat = MmcifGetWriteCategory(*store, table_name);
+		idx_t num_cols = cat->columns.size();
 		chunk.Flatten();
 		lock_guard<mutex> l(gstate.lock);
 		for (idx_t r = 0; r < chunk.size(); r++) {
@@ -1181,7 +1469,7 @@ public:
 				}
 				row[c] = MmcifCellToString(chunk.data[mapped], r);
 			}
-			table.AddRow(row);
+			store->AddRow(*cat, row);
 			gstate.count++;
 		}
 		return SinkResultType::NEED_MORE_INPUT;
@@ -1243,15 +1531,14 @@ public:
 	SinkCombineResultType Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const override {
 		auto &gstate = input.global_state.Cast<MmcifWriteGlobalState>();
 		lock_guard<mutex> l(gstate.lock);
-		vector<unsigned int> indices;
+		std::vector<unsigned int> indices;
 		indices.swap(gstate.delete_indices);
 		sort(indices.begin(), indices.end());
 		indices.erase(unique(indices.begin(), indices.end()), indices.end());
 		if (!indices.empty()) {
-			auto &cif = *catalog.GetCifFile();
-			string first_block;
-			auto &table = MmcifGetTable(cif, table_name, first_block);
-			table.DeleteRows(indices);
+			auto store = catalog.GetWriteStore();
+			auto cat = MmcifGetWriteCategory(*store, table_name);
+			store->DeleteRows(*cat, indices);
 			gstate.count += indices.size();
 		}
 		return SinkCombineResultType::FINISHED;
@@ -1302,18 +1589,17 @@ public:
 	}
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override {
 		auto &gstate = input.global_state.Cast<MmcifWriteGlobalState>();
-		auto &cif = *catalog.GetCifFile();
-		string first_block;
-		auto &table = MmcifGetTable(cif, table_name, first_block);
-		auto col_names = table.GetColumnNames();
+		auto store = catalog.GetWriteStore();
+		auto cat = MmcifGetWriteCategory(*store, table_name);
+		auto col_names = cat->columns;
 		chunk.Flatten();
 		auto &row_ids = chunk.data[chunk.ColumnCount() - 1];
 		auto row_data = FlatVector::GetData<int64_t>(row_ids);
 		lock_guard<mutex> l(gstate.lock);
 		for (idx_t r = 0; r < chunk.size(); r++) {
 			for (idx_t i = 0; i < columns.size(); i++) {
-				table.UpdateCell(NumericCast<unsigned int>(row_data[r]), col_names[columns[i]],
-				                 MmcifCellToString(chunk.data[expr_indices[i]], r));
+				store->UpdateCell(*cat, NumericCast<idx_t>(row_data[r]), col_names[columns[i]],
+				                  MmcifCellToString(chunk.data[expr_indices[i]], r));
 			}
 		}
 		gstate.count += chunk.size();
@@ -1350,7 +1636,7 @@ public:
 	}
 
 	ErrorData CommitTransaction(ClientContext &context, Transaction &transaction) override {
-		// D5: write the mutated in-memory CifFile back to the attached .cif on COMMIT.
+		// D5: write the mutated in-memory write store back to the attached .cif on COMMIT.
 		catalog.Persist(context);
 		lock_guard<mutex> l(lock);
 		transactions.erase(transaction);

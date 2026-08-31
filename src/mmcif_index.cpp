@@ -177,6 +177,7 @@ void MmcifIndex::Build() {
 	};
 
 	idx_t line_start = 0;
+	idx_t skip_to = 0; // when > line_end, the loop jumps to this line start
 	while (line_start < size) {
 		idx_t line_end = line_start;
 		while (line_end < size && base[line_end] != '\n') {
@@ -240,17 +241,37 @@ void MmcifIndex::Build() {
 							tag_end++;
 						}
 						idx_t val_start = MmcifTrimStart(base, tag_end, line_end);
+						// RCSB writes long / multi-line single-tag values on the line
+						// AFTER the tag ("_cat.item" then ";...\n;"), so when this line
+						// carries no value, look at the next line for a ';' value.
+						bool value_from_next = false;
+						idx_t value_consumed_until = 0; // resume line start (0 = none)
+						if (val_start >= line_end) {
+							idx_t nl = line_end + 1;
+							if (nl < size) {
+								idx_t nel = nl;
+								while (nel < size && base[nel] != '\n') {
+									nel++;
+								}
+								idx_t ns = MmcifTrimStart(base, nl, nel);
+								if (ns < nel && base[ns] == ';') {
+									val_start = ns;
+									value_from_next = true;
+									value_consumed_until = nel + 1;
+								}
+							}
+						}
 						MmcifSingleCell cell;
 						cell.col = col;
 						cell.is_null = false;
-						if (val_start >= line_end) {
+						if (val_start >= line_end && !value_from_next) {
 							cell.off = val_start;
 							cell.len = 0;
 							cell.is_null = true; // empty value -> NULL
 						} else {
 							idx_t val_end = line_end;
 							if (base[val_start] == ';') {
-								// Multi-line semicolon value.
+								// Multi-line semicolon value (may span several lines).
 								idx_t p = val_start + 1;
 								while (p < size && base[p] != '\n') {
 									p++;
@@ -271,6 +292,16 @@ void MmcifIndex::Build() {
 									}
 								}
 								val_end = p;
+								// Skip the consumed value lines so their content isn't
+								// re-parsed as tags/stray lines.
+								idx_t resume = val_end;
+								while (resume < size && base[resume] != '\n') {
+									resume++;
+								}
+								if (resume < size) {
+									resume++;
+								}
+								value_consumed_until = resume;
 							} else {
 								while (val_end < size && base[val_end] != '\n' && base[val_end] != ';') {
 									val_end++;
@@ -285,6 +316,7 @@ void MmcifIndex::Build() {
 							cell.len = val_end - val_start;
 						}
 						cur->singles.push_back(cell);
+						skip_to = value_consumed_until;
 					}
 				}
 				if (state != LOOP_HEADER) {
@@ -332,7 +364,12 @@ void MmcifIndex::Build() {
 				state = TOP;
 			}
 		}
-		line_start = line_end + 1; // advance past '\n' (or past EOF)
+		if (skip_to > line_end + 1) {
+			line_start = skip_to;
+			skip_to = 0;
+		} else {
+			line_start = line_end + 1; // advance past '\n' (or past EOF)
+		}
 	}
 	finalize();
 }
@@ -387,6 +424,146 @@ idx_t MmcifIndex::GetRowCount(MmcifCategory &cat) {
 	}
 	cat.row_count.store(count);
 	return count;
+}
+
+// ---------------------------------------------------------------------------
+// MmcifWriteStore: mutable, no-deps write model materialized from the index.
+// ---------------------------------------------------------------------------
+
+// Decode one raw cell span into the stored cell string, matching the RCSB
+// parser's stored forms (so write-back is byte-identical):
+//   - "." / "?"  -> stored literally (null markers)
+//   - 'x' / "x"  -> quotes stripped, interior kept (doubled quotes preserved)
+//   - ";...;"    -> multi-line text, leading ';' and trailing ';'/ws stripped,
+//                   internal newlines kept
+//   - otherwise  -> unquoted token as-is
+static string MmcifDecodeValue(const char *p, idx_t len) {
+	if (len == 0) {
+		return "";
+	}
+	char c = p[0];
+	if (c == '\'' || c == '"') {
+		idx_t interior = len > 2 ? len - 2 : 0;
+		return string(p + 1, interior);
+	}
+	if (c == ';') {
+		idx_t start = 1;
+		idx_t end = len;
+		string val(p + start, end - start);
+		while (!val.empty() && (val.back() == ' ' || val.back() == '\t' || val.back() == '\n' ||
+		                        val.back() == '\r' || val.back() == ';')) {
+			val.pop_back();
+		}
+		return val;
+	}
+	return string(p, len);
+}
+
+shared_ptr<MmcifWriteStore> MmcifWriteStore::FromIndex(const MmcifIndex &index) {
+	auto store = shared_ptr<MmcifWriteStore>(new MmcifWriteStore());
+	store->data_block_name = index.data_block_name;
+	for (auto &cat : index.categories) {
+		MmcifWriteCategory wc;
+		wc.name = cat->name;
+		wc.is_loop = cat->is_loop;
+		wc.columns.assign(cat->columns.begin(), cat->columns.end());
+		idx_t ncols = wc.columns.size();
+		if (cat->is_loop) {
+			idx_t loop_ncols = cat->loop_col_map.size();
+			MmcifValueCursor cursor(index.content_data, cat->data_start, cat->data_end);
+			const char *out;
+			idx_t len;
+			bool is_null;
+			std::vector<std::string> row(loop_ncols, "");
+			idx_t li = 0;
+			while (cursor.Next(&out, &len, &is_null)) {
+				if (is_null) {
+					row[li] = string(out, len); // "." or "?"
+				} else {
+					row[li] = MmcifDecodeValue(out, len);
+				}
+				li++;
+				if (li == loop_ncols) {
+					std::vector<std::string> full(ncols, "");
+					for (idx_t i = 0; i < loop_ncols; i++) {
+						full[cat->loop_col_map[i]] = std::move(row[i]);
+					}
+					wc.rows.push_back(std::move(full));
+					row.assign(loop_ncols, "");
+					li = 0;
+				}
+			}
+			if (li != 0) {
+				// Partial trailing row.
+				std::vector<std::string> full(ncols, "");
+				for (idx_t i = 0; i < loop_ncols; i++) {
+					full[cat->loop_col_map[i]] = std::move(row[i]);
+				}
+				wc.rows.push_back(std::move(full));
+			}
+		} else {
+			// Single-tag category: exactly one row, cells keyed by full column.
+			std::vector<std::string> full(ncols, "");
+			for (auto &sc : cat->singles) {
+				if (sc.is_null) {
+					full[sc.col] = string(index.content_data + sc.off, sc.len); // "." / "?"
+				} else {
+					full[sc.col] = MmcifDecodeValue(index.content_data + sc.off, sc.len);
+				}
+			}
+			wc.rows.push_back(std::move(full));
+		}
+		store->categories.push_back(std::move(wc));
+	}
+	return store;
+}
+
+MmcifWriteCategory *MmcifWriteStore::FindCategory(const string &name) {
+	for (auto &cat : categories) {
+		if (StringUtil::CIEquals(cat.name, name)) {
+			return &cat;
+		}
+	}
+	return nullptr;
+}
+
+std::vector<std::string> MmcifWriteStore::GetCategoryNames() const {
+	std::vector<std::string> names;
+	for (auto &cat : categories) {
+		names.push_back(cat.name);
+	}
+	return names;
+}
+
+idx_t MmcifWriteStore::GetNumRows(MmcifWriteCategory &cat) const {
+	return cat.rows.size();
+}
+
+const std::vector<std::string> &MmcifWriteStore::GetRow(MmcifWriteCategory &cat, idx_t row) const {
+	return cat.rows[row];
+}
+
+void MmcifWriteStore::AddRow(MmcifWriteCategory &cat, const std::vector<std::string> &row) {
+	cat.rows.push_back(row);
+}
+
+void MmcifWriteStore::DeleteRows(MmcifWriteCategory &cat, const std::vector<unsigned int> &rows) {
+	// rows is already sorted + de-duplicated by the caller; delete from the end
+	// so indices stay valid.
+	for (idx_t i = rows.size(); i > 0; i--) {
+		cat.rows.erase(cat.rows.begin() + rows[i - 1]);
+	}
+}
+
+void MmcifWriteStore::UpdateCell(MmcifWriteCategory &cat, idx_t row, const string &col, const string &value) {
+	idx_t col_index = 0;
+	for (idx_t i = 0; i < cat.columns.size(); i++) {
+		if (StringUtil::CIEquals(cat.columns[i], col)) {
+			col_index = i;
+			break;
+		}
+	}
+	cat.rows[row][col_index] = value;
 }
 
 } // namespace duckdb
