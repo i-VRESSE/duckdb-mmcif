@@ -3,10 +3,22 @@
 #include "mmcif_extension.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/main/config.hpp"
+
+#include "mmcif_table_functions.hpp"
+#include "mmcif_catalog.hpp"
 
 namespace duckdb {
 
-void MmcifCoreLoad(ExtensionLoader &loader);
+static void MmcifCoreLoad(ExtensionLoader &loader) {
+	// Table functions (mmcif_scan, mmcif, columns variants, meta variants).
+	MmcifRegisterTableFunctions(loader);
+
+	// Storage extension (ATTACH 'file.cif').
+	auto &db = loader.GetDatabaseInstance();
+	MmcifRegisterStorageExtension(DBConfig::GetConfig(db));
+}
 
 void MmcifExtension::Load(ExtensionLoader &loader) {
 	MmcifCoreLoad(loader);

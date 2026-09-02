@@ -165,10 +165,18 @@ struct MmcifCategory {
 // Load() is process-level cached by path (re-attach reuses content + index).
 // ---------------------------------------------------------------------------
 
+// The write model lives in mmcif_write_store.hpp; the seam between the index
+// and the store is MmcifIndex::Materialize() below.
+class MmcifWriteStore;
+
 class MmcifIndex {
 public:
 	// Load (or fetch from the process-level cache) the index for a file.
 	static shared_ptr<MmcifIndex> Load(const string &path, optional_ptr<ClientContext> context);
+
+	// The seam between the read index and the write model: materialize the
+	// first data block as a mutable MmcifWriteStore (write mode).
+	shared_ptr<MmcifWriteStore> Materialize();
 
 	const string &GetDataBlockName() const {
 		return data_block_name;
@@ -205,44 +213,6 @@ private:
 	string data_block_name;
 	vector<unique_ptr<MmcifCategory>> categories;
 	mutex row_count_lock;
-
-	friend class MmcifWriteStore;
-};
-
-// ---------------------------------------------------------------------------
-// MmcifWriteCategory / MmcifWriteStore: the no-deps mutable write model.
-//
-// Write mode keeps one persistent MmcifWriteStore per attached catalog instead
-// of the RCSB CifFile/ISTable core. Cells are materialized (row-major
-// vector<string>) so DML can mutate in place and a plain-text writer can emit
-// the file back. Null cells are stored as "." / "?" (the RCSB parser's stored
-// forms), so the writer re-emits them unchanged; "" also maps to "?" on emit.
-// ---------------------------------------------------------------------------
-
-struct MmcifWriteCategory {
-	string name;
-	bool is_loop = false;
-	std::vector<std::string> columns;           // item names, in first-seen order
-	std::vector<std::vector<std::string>> rows; // row-major cell strings, one per column
-};
-
-class MmcifWriteStore {
-public:
-	MmcifWriteStore() = default;
-
-	string data_block_name;
-	std::vector<MmcifWriteCategory> categories;
-
-	// Materialize a mutable store from a (read-only) MmcifIndex.
-	static shared_ptr<MmcifWriteStore> FromIndex(const MmcifIndex &index);
-
-	MmcifWriteCategory *FindCategory(const string &name);
-	std::vector<std::string> GetCategoryNames() const;
-	idx_t GetNumRows(MmcifWriteCategory &cat) const;
-	const std::vector<std::string> &GetRow(MmcifWriteCategory &cat, idx_t row) const;
-	void AddRow(MmcifWriteCategory &cat, const std::vector<std::string> &row);
-	void DeleteRows(MmcifWriteCategory &cat, const std::vector<unsigned int> &rows);
-	void UpdateCell(MmcifWriteCategory &cat, idx_t row, const string &col, const string &value);
 };
 
 } // namespace duckdb
