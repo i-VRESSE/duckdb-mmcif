@@ -57,6 +57,20 @@ build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 add_dependencies(${EXTENSION_NAME} mmciff_dict_data)
 add_dependencies(${LOADABLE_EXTENSION_NAME} mmciff_dict_data)
 
+# C++ catch unit tests (test/cpp/*.cpp) using the vendored DuckDB catch header.
+# EXCLUDE_FROM_ALL so normal `make release`/`debug` builds are untouched; build
+# and run them with the `test_cpp` make target.
+option(BUILD_MMCIF_CPP_TESTS "Build the mmcif C++ catch unit tests" ON)
+if(BUILD_MMCIF_CPP_TESTS)
+  add_executable(mmcif_catch_tests EXCLUDE_FROM_ALL test/cpp/mmcif_unit_tests.cpp)
+  set_target_properties(mmcif_catch_tests PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+  target_include_directories(mmcif_catch_tests PRIVATE ${CMAKE_SOURCE_DIR}/third_party/catch)
+  target_compile_definitions(mmcif_catch_tests PRIVATE DUCKDB_BUILD_LIBRARY)
+  target_link_libraries(mmcif_catch_tests ${EXTENSION_NAME} duckdb_static dummy_static_extension_loader)
+  add_dependencies(mmcif_catch_tests ${EXTENSION_NAME})
+  set_target_properties(mmcif_catch_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/test/cpp)
+endif()
+
 install(
   TARGETS ${EXTENSION_NAME}
   EXPORT "${DUCKDB_EXPORT_SET}"

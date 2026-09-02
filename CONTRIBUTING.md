@@ -28,6 +28,14 @@ SQL tests live in `./test/sql` (see `test/sql/mmcif.test`). Run them with:
 make test
 ```
 
+C++ unit tests live in `./test/cpp` and use the vendored Catch header (`duckdb/third_party/catch/catch.hpp`), like DuckDB's own core tests. They cover the parser / index / write-store / writer core paths the SQL tests can't reach. Run them with:
+
+```sh
+make test_cpp
+```
+
+This builds the `mmcif_catch_tests` binary and runs it. The target is excluded from the default build (`make`/`make release`), so it only compiles when you run `make test_cpp`.
+
 ## Trying things out
 
 Start the shell (the extension is pre-loaded):
@@ -48,6 +56,7 @@ curl -o test/data/1amb_updated.cif https://www.ebi.ac.uk/pdbe/entry-files/downlo
 - `modules/` — vendored RCSB `cpp-cif-parser` / `cpp-cif-file` core libraries
 - `dict/` — mmCIF dictionary type index used for column type inference
 - `test/sql/`, `test/data/` — SQLLogic tests and fixtures
+- `test/cpp/` — C++ Catch unit tests (run with `make test_cpp`)
 - `scripts/` — helper scripts (e.g. `mmcif_relationships_diagram.py`, which regenerates `rel.svg`)
 - `docs/examples/` — ready-to-run example scripts
 - `duckdb/`, `extension-ci-tools/` — git submodules
