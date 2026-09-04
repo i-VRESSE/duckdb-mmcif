@@ -117,6 +117,12 @@ Ready-to-run example scripts live in [`docs/examples/`](docs/examples/):
 - [`confidence_filter.sql`](docs/examples/confidence_filter.sql) — AlphaFold pLDDT (B-iso) confidence counting and write-mode residue filtering.
 - [`uniprot_mapping.sql`](docs/examples/uniprot_mapping.sql) — UniProt chain-mapping extraction and injection via `struct_ref`/`struct_ref_seq` for user authored entries or the `_pdbx_sifts_unp_segments` for sifts computed entries.
 
+## Inspiration
+
+This extension was inspired by
+- https://github.com/DeepRank/pdb2sql - Fast and versatile biomolecular structure PDB file parser using SQL queries - made by co-worker 
+- https://github.com/project-gemmi/gemmi - macromolecular crystallography library and utilities - lossy round trip via its Structure class read/write
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for build and test instructions.
