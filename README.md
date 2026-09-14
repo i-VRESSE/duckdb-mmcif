@@ -16,7 +16,7 @@ The format is powerful but awkward to analyze: files are large, syntax is quirky
 - **Typed out of the box** — column types come from the mmCIF dictionary type index, so `Cartn_x` is a `DOUBLE` and `label_seq_id` is a `BIGINT`. `.` and `?` become `NULL`.
 - **Gzip support** — RCSB-style `*.cif.gz` files (e.g. `https://files.rcsb.org/download/1AMB.cif.gz`) are auto-detected and decompressed.
 - **Relationships as data** — discover how categories reference each other programmatically with `mmcif_relationships()`, instead of reading the 10,000-line dictionary.
-- **Fast** — built on the RCSB [`libcifpp`](https://github.com/rcsb/cifpp)-style `cpp-cif-parser` / `cpp-cif-file` core, with DuckDB's vectorized execution on top.
+- **Fast** — custom cif parser/writer inspired by on the RCSB [`libcifpp`](https://github.com/rcsb/cifpp), with DuckDB's vectorized execution on top.
 - **Safe by default** — attached databases are read-only unless you explicitly opt in to write mode.
 
 ## Quick start
