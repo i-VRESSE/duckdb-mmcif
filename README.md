@@ -74,6 +74,12 @@ SELECT * FROM mmcif_relationships('1amb_updated.cif');
 SELECT * FROM mmcif_scan('1amb_updated.cif', 'atom_site');
 ```
 
+Piping a file through stdin works too (like `read_csv`), for all three table functions:
+
+```sh
+cat 1amb_updated.cif | duckdb -c "SELECT * FROM mmcif_scan('/dev/stdin', 'atom_site')"
+```
+
 Entity/relationship diagram of the categories in `test/data/1amb_updated.cif`, as returned by `mmcif_relationships()`:
 
 <!-- Generated with:
