@@ -1,0 +1,32 @@
+# AI Declaration Format (aidecl)
+# Use a role or team name rather than personal name if this file will be public
+
+schema_version: 1.0.0
+project:
+  name: duckdb-mmcif
+  repository: git@github.com:i-VRESSE/duckdb-mmcif.git
+  content_type: software
+ai_usage:
+  used: true
+  summary: This repo was written mainly by LLMs, with human supervision.
+  level: extensive
+  code_proportion:
+    ai_generated_content: 95
+    method: self_reported
+  tools:
+  - name: Opencode
+    type: assistant
+    hosting: on_premise
+    model: Deepseek v4 Flash
+    purpose:
+    - code generation
+  scope:
+    code_completion: true
+    code_review: true
+    code_generation: true
+    documentation: true
+    refactoring: true
+    testing: true
+declaration:
+  date: '2026-09-15'
+  declared_by: sverhoeven
