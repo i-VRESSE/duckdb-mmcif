@@ -1,6 +1,7 @@
 # duckdb-mmcif
 
 [![Research Software Directory Badge](https://img.shields.io/badge/rsd-00a3e3.svg)](https://www.research-software.nl/software/duckdb-mmcif)
+![AI Declaration Format](https://img.shields.io/badge/AI_Declaration_Format-validated-blue)
 
 Query [mmCIF](https://mmcif.wwpdb.org/) (PDBx) structural-biology files with SQL, right inside [DuckDB](https://duckdb.org/).
 

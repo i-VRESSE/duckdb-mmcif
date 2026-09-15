@@ -55,3 +55,7 @@ curl -o test/data/1amb_updated.cif https://www.ebi.ac.uk/pdbe/entry-files/downlo
 ## Updating the DuckDB target version
 
 See [docs/UPDATING.md](docs/UPDATING.md).
+
+## AI Declaration
+
+See [aidecl.yaml](aidecl.yaml) for details on the AI tools used in this repository.
