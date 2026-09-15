@@ -21,6 +21,7 @@ The format is powerful but awkward to analyze: files are large, syntax is quirky
 - **Relationships as data** — discover how categories reference each other programmatically with `mmcif_relationships()`, instead of browsing the [mmcif dictionary website](https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Categories/atom_site.html).
 - **Fast** — custom cif parser/writer inspired by the [RCSB mmcif ccp libraries](https://github.com/rcsb/cpp-common), with DuckDB's vectorized execution on top.
 - **Safe by default** — attached databases are read-only unless you explicitly opt in to write mode.
+- **Ligands too** — Small molecules or ligand files from the [RCSB](https://www.rcsb.org) work the same way as macromolecular entries (see [Ligands](#ligands)).
 
 ## Quick start
 
@@ -80,6 +81,18 @@ Entity/relationship diagram of the categories in `test/data/1amb_updated.cif`, a
       | dot -Tsvg -o rel.svg
 -->
 ![mmcif relationships diagram](rel.svg)
+
+## Ligands
+
+Besides macromolecular entries, ligand (small molecules) files such as [ATP](https://www.rcsb.org/ligand/ATP) can be queried directly.
+
+```sql
+ATTACH 'https://files.rcsb.org/ligands/download/ATP.cif' AS liganddb (TYPE mmcif);
+USE liganddb;
+
+SELECT id, name, type, formula FROM chem_comp;
+-- ATP, "ADENOSINE-5'-TRIPHOSPHATE", NON-POLYMER, "C10 H16 N5 O13 P3"
+```
 
 ## Read-only by default
 

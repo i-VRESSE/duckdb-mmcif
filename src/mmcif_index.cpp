@@ -283,6 +283,11 @@ void MmcifIndex::Build() {
 							}
 							cell.off = val_start;
 							cell.len = val_end - val_start;
+							// "." / "?" missing markers -> NULL, matching the loop
+							// cursor (quoted values have len > 1 and stay literal).
+							if (cell.len == 1 && (base[val_start] == '.' || base[val_start] == '?')) {
+								cell.is_null = true;
+							}
 						}
 						cur->singles.push_back(cell);
 						skip_to = value_consumed_until;
