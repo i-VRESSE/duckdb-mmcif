@@ -712,10 +712,8 @@ static unique_ptr<Catalog> MmcifAttach(optional_ptr<StorageExtensionInfo> storag
 	// Pipes (e.g. /dev/stdin) are one-shot streams: there is nothing to
 	// write back to on COMMIT, so write mode is rejected instead of
 	// silently losing mutations.
-	if (write_mode && !MmcifFile::IsRemotePath(info.path) &&
-	    FileSystem::GetFileSystem(context).IsPipe(info.path)) {
-		throw InvalidInputException(
-		    "mmcif: '%s' cannot be attached with READ_WRITE - pipes are read-only", info.path);
+	if (write_mode && !MmcifFile::IsRemotePath(info.path) && FileSystem::GetFileSystem(context).IsPipe(info.path)) {
+		throw InvalidInputException("mmcif: '%s' cannot be attached with READ_WRITE - pipes are read-only", info.path);
 	}
 	return make_uniq<MmcifCatalog>(db, info.path, write_mode);
 }
