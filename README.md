@@ -14,11 +14,11 @@ The format is powerful but awkward to analyze: files are large, syntax is quirky
 
 ## Why use it?
 
-- **Zero setup analysis** — attach a file and query it; works on your laptop, on thousands of files, or via DuckDB's S3/HTTP filesystems.
+- **Zero-pipeline analysis** — once the extension is [built](CONTRIBUTING.md#building) and loaded, just attach a file and query it. (The extension is not yet on the [community extensions repository](https://duckdb.org/community_extensions/list_of_extensions.html), so it is built from source.)
 - **Typed out of the box** — column types come from the mmCIF dictionary type index, so `Cartn_x` is a `DOUBLE` and `label_seq_id` is a `BIGINT`. `.` and `?` become `NULL`.
-- **Gzip support** — RCSB-style `*.cif.gz` files (e.g. `https://files.rcsb.org/download/1AMB.cif.gz`) are auto-detected and decompressed.
-- **Relationships as data** — discover how categories reference each other programmatically with `mmcif_relationships()`, instead of reading the 10,000-line dictionary.
-- **Fast** — custom cif parser/writer inspired by the RCSB [mmcif ccp libraries](https://github.com/rcsb/cpp-common), with DuckDB's vectorized execution on top.
+- **Gzip support** — RCSB-style `*.cif.gz` files (for example `https://files.rcsb.org/download/1AMB.cif.gz`) are auto-detected and decompressed.
+- **Relationships as data** — discover how categories reference each other programmatically with `mmcif_relationships()`, instead of browsing the [mmcif dictionary website](https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Categories/atom_site.html).
+- **Fast** — custom cif parser/writer inspired by the [RCSB mmcif ccp libraries](https://github.com/rcsb/cpp-common), with DuckDB's vectorized execution on top.
 - **Safe by default** — attached databases are read-only unless you explicitly opt in to write mode.
 
 ## Quick start
@@ -105,7 +105,7 @@ COMMIT;   -- writes the mutated CifFile back to the attached .cif
 ```
 
 >[!NOTE]
->The `COMMIT` will overwrite the file you `ATTACH`-ed. Make copy if you do not want to ovewrite original.
+>The `COMMIT` will overwrite the file you `ATTACH`-ed. Make a copy if you do not want to overwrite the original.
 
 ## Examples
 
