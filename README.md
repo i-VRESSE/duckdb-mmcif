@@ -1,5 +1,7 @@
 # duckdb-mmcif
 
+[![Research Software Directory Badge](https://img.shields.io/badge/rsd-00a3e3.svg)](https://www.research-software.nl/software/duckdb-mmcif)
+
 Query [mmCIF](https://mmcif.wwpdb.org/) (PDBx) structural-biology files with SQL, right inside [DuckDB](https://duckdb.org/).
 
 `ATTACH` a `.cif` file and every mmCIF category shows up as a normal DuckDB table — with column types inferred from the PDBx/mmCIF dictionary. No ETL, no schema design, no Python parsing loop: just SQL over macromolecular structure data.
