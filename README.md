@@ -121,7 +121,7 @@ BEGIN;
 INSERT INTO atom_site (label_atom_id, Cartn_x, type_symbol) VALUES ('O1', 3.5, 'O');
 UPDATE atom_site SET type_symbol='ZZ' WHERE label_atom_id='O1';
 DELETE FROM atom_site WHERE label_atom_id='O1';
-COMMIT;   -- writes the mutated CifFile back to the attached .cif
+COMMIT;   -- writes the mutated tables back to the attached file
 ```
 
 >[!NOTE]
