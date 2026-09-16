@@ -67,7 +67,9 @@ public:
 	string file_name;
 	string table_name;
 	MmcifCatalog *catalog;
+	ColumnList columns;
 
+	const ColumnList &GetColumns() const override;
 	unique_ptr<BaseStatistics> GetStatistics(ClientContext &context, column_t column_id) override;
 	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) override;
 	TableStorageInfo GetStorageInfo(ClientContext &context) override;

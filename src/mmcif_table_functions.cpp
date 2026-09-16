@@ -97,7 +97,7 @@ static void MmcifLoadIndex(MmcifBindData &result, shared_ptr<MmcifIndex> index, 
 }
 
 static unique_ptr<FunctionData> MmcifBind(ClientContext &context, TableFunctionBindInput &input,
-                                          vector<LogicalType> &return_types, vector<string> &names) {
+                                          vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto table_name = input.inputs[1].GetValue<string>();
 	auto result = make_uniq<MmcifBindData>();
@@ -110,7 +110,7 @@ static unique_ptr<FunctionData> MmcifBind(ClientContext &context, TableFunctionB
 	for (auto &col : result->column_names) {
 		auto type = DictionaryIndex::Get().LookupType(table_name, col);
 		result->column_types.push_back(type);
-		names.push_back(col);
+		names.push_back(Identifier(col));
 		return_types.push_back(std::move(type));
 	}
 	return std::move(result);
@@ -133,7 +133,7 @@ static void MmcifScanIndex(ClientContext &context, TableFunctionInput &data, Dat
 	vector<string_t *> ptrs(out_cols);
 	for (idx_t c = 0; c < out_cols; c++) {
 		tmp[c] = make_uniq<Vector>(LogicalType::VARCHAR);
-		ptrs[c] = FlatVector::GetData<string_t>(*tmp[c]);
+		ptrs[c] = FlatVector::GetDataMutable<string_t>(*tmp[c]);
 	}
 
 	idx_t count = 0;
@@ -309,7 +309,7 @@ static void MmcifMetaScan(ClientContext &context, TableFunctionInput &data, Data
 
 // mmcif_tables(file): table_name, column_name, column_type
 static unique_ptr<FunctionData> MmcifTablesBind(ClientContext &context, TableFunctionBindInput &input,
-                                                vector<LogicalType> &return_types, vector<string> &names) {
+                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto result = make_uniq<MmcifMetaBindData>();
 	auto index = MmcifIndex::Load(file_name, &context);
@@ -345,7 +345,7 @@ static std::pair<string, string> MmcifSplitItem(const string &item) {
 
 // mmcif_relationships(file): parent_table, parent_column, child_table, child_column
 static unique_ptr<FunctionData> MmcifRelationshipsBind(ClientContext &context, TableFunctionBindInput &input,
-                                                       vector<LogicalType> &return_types, vector<string> &names) {
+                                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto result = make_uniq<MmcifMetaBindData>();
 	auto index = MmcifIndex::Load(file_name, &context);

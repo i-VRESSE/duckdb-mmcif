@@ -13,8 +13,10 @@
 #include "duckdb/common/operator/numeric_cast.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/execution/physical_operator_states.hpp"
+#include "duckdb/parser/parsed_data/attach_info.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/storage/storage_extension.hpp"
+#include "duckdb/storage/table_storage_info.hpp"
 
 #include "mmcif_dictionary.hpp"
 #include "mmcif_file.hpp"
@@ -269,7 +271,11 @@ public:
 MmcifTableEntry::MmcifTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info,
                                  string file_name_p, string table_name_p, MmcifCatalog *catalog_p)
     : TableCatalogEntry(catalog, schema, info), file_name(std::move(file_name_p)), table_name(std::move(table_name_p)),
-      catalog(catalog_p) {
+      catalog(catalog_p), columns(std::move(info.columns)) {
+}
+
+const ColumnList &MmcifTableEntry::GetColumns() const {
+	return columns;
 }
 
 unique_ptr<BaseStatistics> MmcifTableEntry::GetStatistics(ClientContext &context, column_t column_id) {
@@ -396,13 +402,13 @@ MmcifTableEntry &MmcifSchemaEntry::GetTableEntry(CatalogTransaction transaction,
 		return *existing->second;
 	}
 	auto &catalog = ParentCatalog();
-	CreateTableInfo info(*this, entry_name);
+	CreateTableInfo info(*this, Identifier(entry_name));
 	auto &dict = DictionaryIndex::Get();
 	if (this->catalog->IsWriteMode()) {
 		auto store = this->catalog->GetWriteStore();
 		auto cat = MmcifGetWriteCategory(*store, entry_name);
 		for (auto &col : cat->columns) {
-			info.columns.AddColumn(ColumnDefinition(col, dict.LookupType(entry_name, col)));
+			info.columns.AddColumn(ColumnDefinition(Identifier(col), dict.LookupType(entry_name, col)));
 		}
 	} else {
 		auto index = this->catalog->GetIndex(transaction.context);
@@ -412,7 +418,7 @@ MmcifTableEntry &MmcifSchemaEntry::GetTableEntry(CatalogTransaction transaction,
 			                      file_name.c_str());
 		}
 		for (auto &col : cat->columns) {
-			info.columns.AddColumn(ColumnDefinition(col, dict.LookupType(entry_name, col)));
+			info.columns.AddColumn(ColumnDefinition(Identifier(col), dict.LookupType(entry_name, col)));
 		}
 	}
 	auto entry = make_uniq<MmcifTableEntry>(catalog, *this, info, file_name, entry_name, this->catalog);
@@ -523,7 +529,7 @@ string MmcifCatalog::GetCatalogType() {
 }
 
 optional_ptr<CatalogEntry> MmcifCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
-	if (info.schema == DEFAULT_SCHEMA) {
+	if (info.SchemaName() == Identifier::DefaultSchema()) {
 		return main_schema.get();
 	}
 	throw BinderException("mmcif databases only have a single schema");
@@ -562,8 +568,8 @@ PhysicalOperator &MmcifCatalog::PlanInsert(ClientContext &context, PhysicalPlanG
 	for (auto &mapped : op.column_index_map) {
 		col_map.push_back(mapped);
 	}
-	auto &insert =
-	    planner.Make<MmcifInsertOperator>(op.types, op.estimated_cardinality, *this, op.table.name, std::move(col_map));
+	auto &insert = planner.Make<MmcifInsertOperator>(op.types, op.estimated_cardinality, *this,
+	                                                 op.table.name.GetIdentifierName(), std::move(col_map));
 	if (plan) {
 		insert.children.push_back(*plan);
 	}
@@ -578,8 +584,8 @@ PhysicalOperator &MmcifCatalog::PlanDelete(ClientContext &context, PhysicalPlanG
 		throw NotImplementedException("mmcif write mode does not support DELETE RETURNING");
 	}
 	auto &bound_ref = op.expressions[0]->Cast<BoundReferenceExpression>();
-	auto &del =
-	    planner.Make<MmcifDeleteOperator>(op.types, op.estimated_cardinality, *this, op.table.name, bound_ref.index);
+	auto &del = planner.Make<MmcifDeleteOperator>(op.types, op.estimated_cardinality, *this,
+	                                              op.table.name.GetIdentifierName(), bound_ref.Index());
 	del.children.push_back(plan);
 	return del;
 }
@@ -599,10 +605,11 @@ PhysicalOperator &MmcifCatalog::PlanUpdate(ClientContext &context, PhysicalPlanG
 		}
 		columns.push_back(op.columns[i].index);
 		auto &ref = op.expressions[i]->Cast<BoundReferenceExpression>();
-		expr_indices.push_back(ref.index);
+		expr_indices.push_back(ref.Index());
 	}
-	auto &update = planner.Make<MmcifUpdateOperator>(op.types, op.estimated_cardinality, *this, op.table.name,
-	                                                 std::move(columns), std::move(expr_indices));
+	auto &update =
+	    planner.Make<MmcifUpdateOperator>(op.types, op.estimated_cardinality, *this, op.table.name.GetIdentifierName(),
+	                                      std::move(columns), std::move(expr_indices));
 	update.children.push_back(plan);
 	return update;
 }
