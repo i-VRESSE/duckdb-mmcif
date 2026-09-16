@@ -8,6 +8,7 @@
 
 #include "mmcif_catalog.hpp"
 
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/operator/numeric_cast.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
@@ -707,6 +708,12 @@ static unique_ptr<Catalog> MmcifAttach(optional_ptr<StorageExtensionInfo> storag
 	if (write_mode && MmcifFile::IsRemotePath(info.path)) {
 		throw InvalidInputException(
 		    "mmcif: remote file '%s' cannot be attached with READ_WRITE - remote mmcif files are read-only", info.path);
+	}
+	// Pipes (e.g. /dev/stdin) are one-shot streams: there is nothing to
+	// write back to on COMMIT, so write mode is rejected instead of
+	// silently losing mutations.
+	if (write_mode && !MmcifFile::IsRemotePath(info.path) && FileSystem::GetFileSystem(context).IsPipe(info.path)) {
+		throw InvalidInputException("mmcif: '%s' cannot be attached with READ_WRITE - pipes are read-only", info.path);
 	}
 	return make_uniq<MmcifCatalog>(db, info.path, write_mode);
 }

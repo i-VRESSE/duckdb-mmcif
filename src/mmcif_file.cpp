@@ -35,7 +35,11 @@ bool MmcifFile::IsRemotePath(const string &path) {
 string MmcifFile::Read(const string &file_name, optional_ptr<ClientContext> context) {
 	if (context) {
 		auto &fs = FileSystem::GetFileSystem(*context);
-		if (!MmcifFile::IsRemotePath(file_name) && !fs.FileExists(file_name)) {
+		// Pipes (e.g. /dev/stdin, named FIFOs) fail FileExists (not a regular
+		// file) but are readable, so exempt them. This enables
+		// `cat file.cif | duckdb -c "SELECT * FROM mmcif_scan('/dev/stdin', ...)"`
+		// like read_csv supports.
+		if (!MmcifFile::IsRemotePath(file_name) && !fs.FileExists(file_name) && !fs.IsPipe(file_name)) {
 			throw IOException("mmcif: file not found: %s", file_name);
 		}
 		auto handle = fs.OpenFile(file_name, FileFlags::FILE_FLAGS_READ);

@@ -402,3 +402,104 @@ statement error
 ATTACH 'weirdproto://x/y.cif' AS rdb (TYPE mmcif, READ_WRITE TRUE);
 ----
 read-only
+
+# ---------------------------------------------------------------------------
+# Ligand files from the RCSB Chemical Component Dictionary (fixture:
+# https://files.rcsb.org/ligands/download/ATP.cif). These are small files
+# dominated by the non-looped chem_comp category plus looped atom/bond and
+# descriptor/identifier/audit categories.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT count(*) FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/ATP.cif');
+----
+63
+
+query I
+SELECT count(*) FROM mmcif_relationships('__WORKING_DIRECTORY__/test/data/ATP.cif');
+----
+8
+
+# chem_comp_atom keys are referenced by both ends of chem_comp_bond
+query TTTT
+SELECT parent_table, parent_column, child_table, child_column FROM mmcif_relationships('__WORKING_DIRECTORY__/test/data/ATP.cif') WHERE parent_table='chem_comp_atom' ORDER BY child_column;
+----
+chem_comp_atom	atom_id	chem_comp_bond	atom_id_1
+chem_comp_atom	atom_id	chem_comp_bond	atom_id_2
+chem_comp_atom	comp_id	chem_comp_bond	comp_id
+
+statement ok
+ATTACH '__WORKING_DIRECTORY__/test/data/ATP.cif' AS liganddb (TYPE mmcif);
+
+statement ok
+USE liganddb;
+
+query T
+SELECT table_name FROM duckdb_tables() WHERE database_name='liganddb' ORDER BY table_name;
+----
+chem_comp
+chem_comp_atom
+chem_comp_bond
+pdbx_chem_comp_audit
+pdbx_chem_comp_descriptor
+pdbx_chem_comp_identifier
+
+# The non-looped chem_comp category scans as exactly one row
+query TTT
+SELECT id, type, formula FROM chem_comp;
+----
+ATP	NON-POLYMER	"C10 H16 N5 O13 P3"
+
+# Dictionary-driven column types for single-tag items too
+query TT
+SELECT name, type FROM pragma_table_info('chem_comp') WHERE name IN ('formula_weight','pdbx_formal_charge') ORDER BY name;
+----
+formula_weight	DOUBLE
+pdbx_formal_charge	BIGINT
+
+query TI
+SELECT formula_weight, pdbx_formal_charge FROM chem_comp;
+----
+507.181	0
+
+# '?' cells in non-looped categories map to NULL, same as in loops
+query II
+SELECT (mon_nstd_parent_comp_id IS NULL)::INT, (pdbx_synonyms IS NULL)::INT FROM chem_comp;
+----
+1	1
+
+# Looped atom and bond categories
+query I
+SELECT count(*) FROM chem_comp_atom;
+----
+47
+
+query TTT
+SELECT atom_id, type_symbol, model_Cartn_x FROM chem_comp_atom ORDER BY pdbx_ordinal LIMIT 3;
+----
+PG	P	46.107
+O1G	O	45.779
+O2G	O	47.382
+
+query I
+SELECT count(*) FROM chem_comp_atom WHERE type_symbol='H';
+----
+16
+
+query I
+SELECT count(*) FROM chem_comp_bond;
+----
+49
+
+query I
+SELECT count(*) FROM chem_comp_bond WHERE value_order='DOUB';
+----
+7
+
+query T
+SELECT descriptor FROM pdbx_chem_comp_descriptor WHERE type='InChIKey';
+----
+ZKHQWZAMYRWXGA-KQYNXXCUSA-N
+
+statement ok
+USE memory;

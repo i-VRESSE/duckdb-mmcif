@@ -1,5 +1,9 @@
 # duckdb-mmcif
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22771585.svg)](https://doi.org/10.5281/zenodo.22771585)
+[![Research Software Directory Badge](https://img.shields.io/badge/rsd-00a3e3.svg)](https://www.research-software.nl/software/duckdb-mmcif)
+![AI Declaration Format](https://img.shields.io/badge/AI_Declaration_Format-validated-blue)
+
 Query [mmCIF](https://mmcif.wwpdb.org/) (PDBx) structural-biology files with SQL, right inside [DuckDB](https://duckdb.org/).
 
 `ATTACH` a `.cif` file and every mmCIF category shows up as a normal DuckDB table — with column types inferred from the PDBx/mmCIF dictionary. No ETL, no schema design, no Python parsing loop: just SQL over macromolecular structure data.
@@ -12,12 +16,13 @@ The format is powerful but awkward to analyze: files are large, syntax is quirky
 
 ## Why use it?
 
-- **Zero setup analysis** — attach a file and query it; works on your laptop, on thousands of files, or via DuckDB's S3/HTTP filesystems.
+- **Zero-pipeline analysis** — once the extension is [built](CONTRIBUTING.md#building) and loaded, just attach a file and query it. (The extension is not yet on the [community extensions repository](https://duckdb.org/community_extensions/list_of_extensions.html), so it is built from source.)
 - **Typed out of the box** — column types come from the mmCIF dictionary type index, so `Cartn_x` is a `DOUBLE` and `label_seq_id` is a `BIGINT`. `.` and `?` become `NULL`.
-- **Gzip support** — RCSB-style `*.cif.gz` files (e.g. `https://files.rcsb.org/download/1AMB.cif.gz`) are auto-detected and decompressed.
-- **Relationships as data** — discover how categories reference each other programmatically with `mmcif_relationships()`, instead of reading the 10,000-line dictionary.
-- **Fast** — built on the RCSB [`libcifpp`](https://github.com/rcsb/cifpp)-style `cpp-cif-parser` / `cpp-cif-file` core, with DuckDB's vectorized execution on top.
+- **Gzip support** — RCSB-style `*.cif.gz` files (for example `https://files.rcsb.org/download/1AMB.cif.gz`) are auto-detected and decompressed.
+- **Relationships as data** — discover how categories reference each other programmatically with `mmcif_relationships()`, instead of browsing the [mmcif dictionary website](https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Categories/atom_site.html).
+- **Fast** — custom cif parser/writer inspired by the [RCSB mmcif ccp libraries](https://github.com/rcsb/cpp-common), with DuckDB's vectorized execution on top.
 - **Safe by default** — attached databases are read-only unless you explicitly opt in to write mode.
+- **Ligands too** — Small molecules or ligand files from the [RCSB](https://www.rcsb.org) work the same way as macromolecular entries (see [Ligands](#ligands)).
 
 ## Quick start
 
@@ -70,6 +75,12 @@ SELECT * FROM mmcif_relationships('1amb_updated.cif');
 SELECT * FROM mmcif_scan('1amb_updated.cif', 'atom_site');
 ```
 
+Piping a file through stdin works too (like `read_csv`), for all three table functions:
+
+```sh
+cat 1amb_updated.cif | duckdb -c "SELECT * FROM mmcif_scan('/dev/stdin', 'atom_site')"
+```
+
 Entity/relationship diagram of the categories in `test/data/1amb_updated.cif`, as returned by `mmcif_relationships()`:
 
 <!-- Generated with:
@@ -77,6 +88,18 @@ Entity/relationship diagram of the categories in `test/data/1amb_updated.cif`, a
       | dot -Tsvg -o rel.svg
 -->
 ![mmcif relationships diagram](rel.svg)
+
+## Ligands
+
+Besides macromolecular entries, ligand (small molecules) files such as [ATP](https://www.rcsb.org/ligand/ATP) can be queried directly.
+
+```sql
+ATTACH 'https://files.rcsb.org/ligands/download/ATP.cif' AS liganddb (TYPE mmcif);
+USE liganddb;
+
+SELECT id, name, type, formula FROM chem_comp;
+-- ATP, "ADENOSINE-5'-TRIPHOSPHATE", NON-POLYMER, "C10 H16 N5 O13 P3"
+```
 
 ## Read-only by default
 
@@ -99,11 +122,11 @@ BEGIN;
 INSERT INTO atom_site (label_atom_id, Cartn_x, type_symbol) VALUES ('O1', 3.5, 'O');
 UPDATE atom_site SET type_symbol='ZZ' WHERE label_atom_id='O1';
 DELETE FROM atom_site WHERE label_atom_id='O1';
-COMMIT;   -- writes the mutated CifFile back to the attached .cif
+COMMIT;   -- writes the mutated tables back to the attached file
 ```
 
 >[!NOTE]
->The `COMMIT` will overwrite the file you `ATTACH`-ed. Make copy if you do not want to ovewrite original.
+>The `COMMIT` will overwrite the file you `ATTACH`-ed. Make a copy if you do not want to overwrite the original.
 
 ## Examples
 
@@ -116,6 +139,12 @@ Ready-to-run example scripts live in [`docs/examples/`](docs/examples/):
 - [`secondary_structure.sql`](docs/examples/secondary_structure.sql) — helix/sheet residue counts and ratios from `struct_conf` / `struct_sheet_range`.
 - [`confidence_filter.sql`](docs/examples/confidence_filter.sql) — AlphaFold pLDDT (B-iso) confidence counting and write-mode residue filtering.
 - [`uniprot_mapping.sql`](docs/examples/uniprot_mapping.sql) — UniProt chain-mapping extraction and injection via `struct_ref`/`struct_ref_seq` for user authored entries or the `_pdbx_sifts_unp_segments` for sifts computed entries.
+
+## Inspiration
+
+This extension was inspired by
+- https://github.com/DeepRank/pdb2sql - Fast and versatile biomolecular structure PDB file parser using SQL queries - made by co-worker 
+- https://github.com/project-gemmi/gemmi - macromolecular crystallography library and utilities - lossy round trip via its Structure class read/write
 
 ## Contributing
 
