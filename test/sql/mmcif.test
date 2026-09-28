@@ -16,6 +16,24 @@ Catalog Error: Table Function with name mmcif_relationships does not exist!
 # Require statement will ensure this test is run with this extension loaded
 require mmcif
 
+# The extension's table functions are discoverable through duckdb_functions():
+# each carries a description, real parameter names, an example and the mmcif
+# category.
+query TT
+SELECT function_name, parameters FROM duckdb_functions() WHERE function_name LIKE 'mmcif%' ORDER BY function_name;
+----
+mmcif_relationships	[file]
+mmcif_scan	[file, table]
+mmcif_tables	[file]
+
+query TIII
+SELECT function_name, (description IS NOT NULL)::INT, len(examples), len(categories)
+FROM duckdb_functions() WHERE function_name LIKE 'mmcif%' ORDER BY function_name;
+----
+mmcif_relationships	1	1	1
+mmcif_scan	1	1	1
+mmcif_tables	1	1	1
+
 # Global metadata table functions work without ATTACH
 query I
 SELECT count(*) FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/1amb_updated.cif');

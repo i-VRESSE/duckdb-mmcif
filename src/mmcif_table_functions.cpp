@@ -17,6 +17,7 @@
 #include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 
 #include <utility>
 
@@ -371,18 +372,46 @@ static unique_ptr<FunctionData> MmcifRelationshipsBind(ClientContext &context, T
 	return std::move(result);
 }
 
-void MmcifRegisterTableFunctions(ExtensionLoader &loader) {
-	loader.RegisterFunction(MmcifScanFunction());
+// Attach a FunctionDescription to a table function so its purpose, parameter
+// names, examples and category are discoverable through duckdb_functions().
+static void MmcifRegisterDescribed(ExtensionLoader &loader, TableFunction function, vector<string> parameter_names,
+                                   string description, vector<string> examples) {
+	CreateTableFunctionInfo info(std::move(function));
+	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	FunctionDescription desc;
+	desc.parameter_names = std::move(parameter_names);
+	desc.description = std::move(description);
+	desc.examples = std::move(examples);
+	desc.categories = {"mmcif"};
+	info.descriptions.push_back(std::move(desc));
+	loader.RegisterFunction(std::move(info));
+}
 
+void MmcifRegisterTableFunctions(ExtensionLoader &loader) {
+	// mmcif_scan(file, table): scan one category of an mmCIF file as a table.
+	MmcifRegisterDescribed(loader, MmcifScanFunction(), {"file", "table"},
+	                       "Scan one mmCIF category as a table, reading its rows directly from a .cif or .cif.gz file.",
+	                       {"SELECT * FROM mmcif_scan('https://files.rcsb.org/download/1AMB.cif.gz', 'atom_site'); "
+	                        "-- 438 rows"});
+
+	// mmcif_tables(file): one row per (category, column) with its inferred type.
 	TableFunction mmcif_tables("mmcif_tables", {LogicalType::VARCHAR}, MmcifMetaScan, MmcifTablesBind,
 	                           MmcifMetaInitGlobal);
 	mmcif_tables.projection_pushdown = true;
-	loader.RegisterFunction(mmcif_tables);
+	MmcifRegisterDescribed(loader, std::move(mmcif_tables), {"file"},
+	                       "List the categories and columns (with their dictionary-inferred types) in an mmCIF file.",
+	                       {"SELECT * FROM mmcif_tables('https://files.rcsb.org/download/1AMB.cif.gz'); "
+	                        "-- 342 rows"});
 
+	// mmcif_relationships(file): parent/child (table, column) key pairs.
 	TableFunction mmcif_relationships("mmcif_relationships", {LogicalType::VARCHAR}, MmcifMetaScan,
 	                                  MmcifRelationshipsBind, MmcifMetaInitGlobal);
 	mmcif_relationships.projection_pushdown = true;
-	loader.RegisterFunction(mmcif_relationships);
+	MmcifRegisterDescribed(loader, std::move(mmcif_relationships), {"file"},
+	                       "List the parent/child key relationships between the categories in an mmCIF file, each side "
+	                       "as a (table, column) pair.",
+	                       {"SELECT * FROM mmcif_relationships('https://files.rcsb.org/download/1AMB.cif.gz'); "
+	                        "-- 86 rows"});
 }
 
 } // namespace duckdb
