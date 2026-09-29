@@ -80,8 +80,17 @@ When a new [PDBx/mmCIF dictionary](https://mmcif.wwpdb.org/pdbx-mmcif-home-page.
        https://mmcif.wwpdb.org/dictionaries/ascii/mmcif_pdbx_v50.dic
    ```
 
-2. Update `DIC_VERSION` in `scripts/generate_type_index.py` and, if the download
-   location changed, update `SOURCE_URL` as well.
+2. Update the dictionary metadata and URLs:
+
+   - Set `DIC_VERSION` in `scripts/generate_type_index.py` to the version in the
+     downloaded dictionary.
+   - If the download location changed, update `SOURCE_URL` in that script.
+   - If the dictionary path or filename changed, replace the documentation base
+     URL (`https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic`) everywhere
+     it occurs. This URL is used to build catalog comments in
+     `src/mmcif_dictionary.cpp` and is also present in `README.md` and the
+     expected results in `test/sql/mmcif.test`.
+
 3. Regenerate both checked-in dictionary artifacts:
 
    ```sh
