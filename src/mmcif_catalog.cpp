@@ -405,6 +405,7 @@ MmcifTableEntry &MmcifSchemaEntry::GetTableEntry(CatalogTransaction transaction,
 	auto &catalog = ParentCatalog();
 	CreateTableInfo info(*this, entry_name);
 	auto &dict = DictionaryIndex::Get();
+	info.comment = Value(dict.GetCategoryUrl(entry_name));
 	if (this->catalog->IsWriteMode()) {
 		auto store = this->catalog->GetWriteStore();
 		auto cat = MmcifGetWriteCategory(*store, entry_name);

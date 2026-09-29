@@ -5,7 +5,8 @@
 //
 //   Pass 1 (index): scan the whole decompressed buffer once, line by line,
 //   recording each category's columns and the byte ranges of its loop data.
-//   No cell strings are materialized, so schema enumeration, mmcif_columns(),
+//   No cell strings are materialized, so schema enumeration, mmcif_tables(),
+//   mmcif_columns(),
 //   and DESCRIBE are fast with no full parse.
 //
 //   Pass 2 (materialize): parse only the queried category's loop range, row

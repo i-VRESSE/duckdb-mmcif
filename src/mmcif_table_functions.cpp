@@ -255,8 +255,9 @@ TableFunction MmcifScanFunction() {
 }
 
 // ---------------------------------------------------------------------------
-// Metadata table functions (global, issue 02): mmcif_columns(file) and
-// mmcif_relationships(file), filtered to categories present in the file.
+// Metadata table functions (global, issue 02): mmcif_tables(file),
+// mmcif_columns(file), and mmcif_relationships(file), filtered to categories
+// present in the file.
 // ---------------------------------------------------------------------------
 
 struct MmcifMetaBindData : public FunctionData {
@@ -306,6 +307,30 @@ static void MmcifMetaScan(ClientContext &context, TableFunctionInput &data, Data
 	}
 	gstate.position = row;
 	output.SetCardinality(count);
+}
+
+// mmcif_tables(file): table_name, comment, column_count
+static unique_ptr<FunctionData> MmcifTablesBind(ClientContext &context, TableFunctionBindInput &input,
+                                                vector<LogicalType> &return_types, vector<string> &names) {
+	auto file_name = input.inputs[0].GetValue<string>();
+	auto result = make_uniq<MmcifMetaBindData>();
+	auto index = MmcifIndex::Load(file_name, &context);
+	vector<string> categories;
+	index->GetCategoryNames(categories);
+	auto &dictionary = DictionaryIndex::Get();
+	for (auto &category : categories) {
+		auto cat = index->FindCategory(category);
+		D_ASSERT(cat);
+		result->rows.push_back({Value(category), Value(dictionary.GetCategoryUrl(category)),
+		                        Value::BIGINT(NumericCast<int64_t>(cat->columns.size()))});
+	}
+	names.emplace_back("table_name");
+	names.emplace_back("comment");
+	names.emplace_back("column_count");
+	return_types.push_back(LogicalType::VARCHAR);
+	return_types.push_back(LogicalType::VARCHAR);
+	return_types.push_back(LogicalType::BIGINT);
+	return std::move(result);
 }
 
 // mmcif_columns(file): table_name, column_name, column_index, comment, data_type
@@ -402,6 +427,15 @@ void MmcifRegisterTableFunctions(ExtensionLoader &loader) {
 	                       "Scan one mmCIF category as a table, reading its rows directly from a .cif or .cif.gz file.",
 	                       {"SELECT * FROM mmcif_scan('https://files.rcsb.org/download/1AMB.cif.gz', 'atom_site'); "
 	                        "-- 438 rows"});
+
+	// mmcif_tables(file): one row per category with its dictionary page and column count.
+	TableFunction mmcif_tables("mmcif_tables", {LogicalType::VARCHAR}, MmcifMetaScan, MmcifTablesBind,
+	                           MmcifMetaInitGlobal);
+	mmcif_tables.projection_pushdown = true;
+	MmcifRegisterDescribed(loader, std::move(mmcif_tables), {"file"},
+	                       "List the categories in an mmCIF file with their dictionary documentation links and "
+	                       "column counts.",
+	                       {"SELECT * FROM mmcif_tables('https://files.rcsb.org/download/1AMB.cif.gz');"});
 
 	// mmcif_columns(file): one row per (category, column) with its inferred type.
 	TableFunction mmcif_columns("mmcif_columns", {LogicalType::VARCHAR}, MmcifMetaScan, MmcifColumnsBind,

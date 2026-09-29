@@ -64,9 +64,12 @@ DESCRIBE atom_site;
 
 ## Table functions
 
-Three global table functions work without attaching anything:
+Four global table functions work without attaching anything:
 
 ```sql
+-- one row per category with its dictionary documentation link and column count
+SELECT * FROM mmcif_tables('1amb_updated.cif');
+
 -- one row per (category, column) with its inferred type
 SELECT * FROM mmcif_columns('1amb_updated.cif');
 
@@ -77,7 +80,10 @@ SELECT * FROM mmcif_relationships('1amb_updated.cif');
 SELECT * FROM mmcif_scan('1amb_updated.cif', 'atom_site');
 ```
 
-Piping a file through stdin works too (like `read_csv`), for all three table functions:
+The category and item documentation links are also exposed as `comment` by
+`duckdb_tables()` and `duckdb_columns()` for attached mmCIF databases.
+
+Piping a file through stdin works too (like `read_csv`), for all four table functions:
 
 ```sh
 cat 1amb_updated.cif | duckdb -c "SELECT * FROM mmcif_scan('/dev/stdin', 'atom_site')"

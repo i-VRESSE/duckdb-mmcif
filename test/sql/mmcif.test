@@ -9,6 +9,11 @@ SELECT * FROM mmcif_columns('x.cif');
 Catalog Error: Table Function with name mmcif_columns does not exist!
 
 statement error
+SELECT * FROM mmcif_tables('x.cif');
+----
+Catalog Error: Table Function with name mmcif_tables does not exist!
+
+statement error
 SELECT * FROM mmcif_relationships('x.cif');
 ----
 Catalog Error: Table Function with name mmcif_relationships does not exist!
@@ -25,6 +30,7 @@ SELECT function_name, parameters, parameter_types FROM duckdb_functions() WHERE 
 mmcif_columns	[file]	[VARCHAR]
 mmcif_relationships	[file]	[VARCHAR]
 mmcif_scan	[file, table]	[VARCHAR, VARCHAR]
+mmcif_tables	[file]	[VARCHAR]
 
 query TIII
 SELECT function_name, (description IS NOT NULL)::INT, len(examples), len(categories)
@@ -33,8 +39,19 @@ FROM duckdb_functions() WHERE function_name LIKE 'mmcif%' ORDER BY function_name
 mmcif_columns	1	1	1
 mmcif_relationships	1	1	1
 mmcif_scan	1	1	1
+mmcif_tables	1	1	1
 
 # Global metadata table functions work without ATTACH
+query I
+SELECT count(*) FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/1amb_updated.cif');
+----
+43
+
+query TTI
+SELECT table_name, comment, column_count FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/1amb_updated.cif') WHERE table_name='atom_site';
+----
+atom_site	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Categories/atom_site.html	21
+
 query I
 SELECT count(*) FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/1amb_updated.cif');
 ----
@@ -80,12 +97,12 @@ id	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.id.h
 Cartn_x	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.Cartn_x.html
 
 # SHOW TABLES lists every category present in the file
-query T
-SELECT table_name FROM duckdb_tables() WHERE database_name='mmcifdb' ORDER BY table_name LIMIT 3;
+query TT
+SELECT table_name, comment FROM duckdb_tables() WHERE database_name='mmcifdb' ORDER BY table_name LIMIT 3;
 ----
-atom_site
-atom_sites
-atom_type
+atom_site	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Categories/atom_site.html
+atom_sites	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Categories/atom_sites.html
+atom_type	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Categories/atom_type.html
 
 # The dictionary-driven column types come through the catalog
 query TT
@@ -199,6 +216,11 @@ statement ok
 USE wdb;
 
 # Writable attachments expose the same catalog comments.
+query TT
+SELECT table_name, comment FROM duckdb_tables() WHERE database_name='wdb';
+----
+atom_site	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Categories/atom_site.html
+
 query TT
 SELECT column_name, comment FROM duckdb_columns() WHERE database_name='wdb' AND table_name='atom_site' ORDER BY column_index;
 ----

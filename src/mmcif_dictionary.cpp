@@ -77,6 +77,10 @@ LogicalType DictionaryIndex::LookupType(const string &category, const string &co
 	return LogicalType::VARCHAR;
 }
 
+string DictionaryIndex::GetCategoryUrl(const string &category) const {
+	return "https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Categories/" + category + ".html";
+}
+
 string DictionaryIndex::GetItemUrl(const string &category, const string &column) const {
 	auto key = "_" + category + "." + column;
 	auto entry = types.find(key);
