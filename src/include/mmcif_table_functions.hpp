@@ -49,7 +49,7 @@ struct MmcifBindData : public FunctionData {
 // the attached-table scan.
 TableFunction MmcifScanFunction();
 
-// Registers mmcif_scan, mmcif_tables, and mmcif_relationships on the loader.
+// Registers mmcif_scan, mmcif_columns, and mmcif_relationships on the loader.
 void MmcifRegisterTableFunctions(ExtensionLoader &loader);
 
 } // namespace duckdb

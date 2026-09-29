@@ -255,12 +255,12 @@ TableFunction MmcifScanFunction() {
 }
 
 // ---------------------------------------------------------------------------
-// Metadata table functions (global, issue 02): mmcif_tables(file) and
+// Metadata table functions (global, issue 02): mmcif_columns(file) and
 // mmcif_relationships(file), filtered to categories present in the file.
 // ---------------------------------------------------------------------------
 
 struct MmcifMetaBindData : public FunctionData {
-	std::vector<std::vector<string>> rows; // one row of strings per output row
+	std::vector<std::vector<Value>> rows;
 
 	unique_ptr<FunctionData> Copy() const override {
 		auto result = make_uniq<MmcifMetaBindData>();
@@ -299,7 +299,7 @@ static void MmcifMetaScan(ClientContext &context, TableFunctionInput &data, Data
 		const auto &r = bind.rows[row];
 		for (idx_t c = 0; c < output.ColumnCount(); c++) {
 			auto col_id = gstate.column_ids[c];
-			output.data[c].SetValue(count, Value(r[col_id]));
+			output.data[c].SetValue(count, r[col_id]);
 		}
 		row++;
 		count++;
@@ -308,9 +308,9 @@ static void MmcifMetaScan(ClientContext &context, TableFunctionInput &data, Data
 	output.SetCardinality(count);
 }
 
-// mmcif_tables(file): table_name, column_name, column_type
-static unique_ptr<FunctionData> MmcifTablesBind(ClientContext &context, TableFunctionBindInput &input,
-                                                vector<LogicalType> &return_types, vector<string> &names) {
+// mmcif_columns(file): table_name, column_name, column_index, data_type
+static unique_ptr<FunctionData> MmcifColumnsBind(ClientContext &context, TableFunctionBindInput &input,
+                                                 vector<LogicalType> &return_types, vector<string> &names) {
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto result = make_uniq<MmcifMetaBindData>();
 	auto index = MmcifIndex::Load(file_name, &context);
@@ -321,17 +321,21 @@ static unique_ptr<FunctionData> MmcifTablesBind(ClientContext &context, TableFun
 		if (!cat) {
 			continue;
 		}
-		for (auto &col : cat->columns) {
+		for (idx_t column_index = 0; column_index < cat->columns.size(); column_index++) {
+			auto &col = cat->columns[column_index];
 			auto type = DictionaryIndex::Get().LookupType(category, col);
-			vector<string> row = {category, col, type.ToString()};
+			vector<Value> row = {Value(category), Value(col), Value::INTEGER(NumericCast<int32_t>(column_index + 1)),
+			                     Value(type.ToString())};
 			result->rows.push_back(std::move(row));
 		}
 	}
 	names.emplace_back("table_name");
 	names.emplace_back("column_name");
-	names.emplace_back("column_type");
+	names.emplace_back("column_index");
+	names.emplace_back("data_type");
 	return_types.push_back(LogicalType::VARCHAR);
 	return_types.push_back(LogicalType::VARCHAR);
+	return_types.push_back(LogicalType::INTEGER);
 	return_types.push_back(LogicalType::VARCHAR);
 	return std::move(result);
 }
@@ -357,7 +361,8 @@ static unique_ptr<FunctionData> MmcifRelationshipsBind(ClientContext &context, T
 		auto parent_item = MmcifSplitItem(rel.first);
 		auto child_item = MmcifSplitItem(rel.second);
 		if (present.find(parent_item.first) != present.end() && present.find(child_item.first) != present.end()) {
-			vector<string> row = {parent_item.first, parent_item.second, child_item.first, child_item.second};
+			vector<Value> row = {Value(parent_item.first), Value(parent_item.second), Value(child_item.first),
+			                     Value(child_item.second)};
 			result->rows.push_back(std::move(row));
 		}
 	}
@@ -395,13 +400,13 @@ void MmcifRegisterTableFunctions(ExtensionLoader &loader) {
 	                       {"SELECT * FROM mmcif_scan('https://files.rcsb.org/download/1AMB.cif.gz', 'atom_site'); "
 	                        "-- 438 rows"});
 
-	// mmcif_tables(file): one row per (category, column) with its inferred type.
-	TableFunction mmcif_tables("mmcif_tables", {LogicalType::VARCHAR}, MmcifMetaScan, MmcifTablesBind,
-	                           MmcifMetaInitGlobal);
-	mmcif_tables.projection_pushdown = true;
-	MmcifRegisterDescribed(loader, std::move(mmcif_tables), {"file"},
+	// mmcif_columns(file): one row per (category, column) with its inferred type.
+	TableFunction mmcif_columns("mmcif_columns", {LogicalType::VARCHAR}, MmcifMetaScan, MmcifColumnsBind,
+	                            MmcifMetaInitGlobal);
+	mmcif_columns.projection_pushdown = true;
+	MmcifRegisterDescribed(loader, std::move(mmcif_columns), {"file"},
 	                       "List the categories and columns (with their dictionary-inferred types) in an mmCIF file.",
-	                       {"SELECT * FROM mmcif_tables('https://files.rcsb.org/download/1AMB.cif.gz'); "
+	                       {"SELECT * FROM mmcif_columns('https://files.rcsb.org/download/1AMB.cif.gz'); "
 	                        "-- 342 rows"});
 
 	// mmcif_relationships(file): parent/child (table, column) key pairs.

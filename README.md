@@ -68,7 +68,7 @@ Three global table functions work without attaching anything:
 
 ```sql
 -- one row per (category, column) with its inferred type
-SELECT * FROM mmcif_tables('1amb_updated.cif');
+SELECT * FROM mmcif_columns('1amb_updated.cif');
 
 -- one row per parent/child relationship, each side a (table, column) pair
 SELECT * FROM mmcif_relationships('1amb_updated.cif');

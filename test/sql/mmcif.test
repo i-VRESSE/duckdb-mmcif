@@ -4,9 +4,9 @@
 
 # Before the extension is loaded, the mmcif table functions do not exist
 statement error
-SELECT * FROM mmcif_tables('x.cif');
+SELECT * FROM mmcif_columns('x.cif');
 ----
-Catalog Error: Table Function with name mmcif_tables does not exist!
+Catalog Error: Table Function with name mmcif_columns does not exist!
 
 statement error
 SELECT * FROM mmcif_relationships('x.cif');
@@ -22,30 +22,30 @@ require mmcif
 query TTT
 SELECT function_name, parameters, parameter_types FROM duckdb_functions() WHERE function_name LIKE 'mmcif%' ORDER BY function_name;
 ----
+mmcif_columns	[file]	[VARCHAR]
 mmcif_relationships	[file]	[VARCHAR]
 mmcif_scan	[file, table]	[VARCHAR, VARCHAR]
-mmcif_tables	[file]	[VARCHAR]
 
 query TIII
 SELECT function_name, (description IS NOT NULL)::INT, len(examples), len(categories)
 FROM duckdb_functions() WHERE function_name LIKE 'mmcif%' ORDER BY function_name;
 ----
+mmcif_columns	1	1	1
 mmcif_relationships	1	1	1
 mmcif_scan	1	1	1
-mmcif_tables	1	1	1
 
 # Global metadata table functions work without ATTACH
 query I
-SELECT count(*) FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/1amb_updated.cif');
+SELECT count(*) FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/1amb_updated.cif');
 ----
 342
 
-query III
-SELECT table_name, column_name, column_type FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/1amb_updated.cif') WHERE table_name='atom_site' ORDER BY column_name LIMIT 3;
+query TTIT
+SELECT table_name, column_name, column_index, data_type FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/1amb_updated.cif') WHERE table_name='atom_site' ORDER BY column_name LIMIT 3;
 ----
-atom_site	B_iso_or_equiv	DOUBLE
-atom_site	Cartn_x	DOUBLE
-atom_site	Cartn_y	DOUBLE
+atom_site	B_iso_or_equiv	15	DOUBLE
+atom_site	Cartn_x	11	DOUBLE
+atom_site	Cartn_y	12	DOUBLE
 
 query I
 SELECT count(*) FROM mmcif_relationships('__WORKING_DIRECTORY__/test/data/1amb_updated.cif');
@@ -113,7 +113,7 @@ SELECT count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/1amb_updated.ci
 
 # gzip'd mmcif files work the same way as uncompressed ones
 query I
-SELECT count(*) FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/1amb_updated.cif.gz');
+SELECT count(*) FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/1amb_updated.cif.gz');
 ----
 342
 
@@ -435,7 +435,7 @@ read-only
 # ---------------------------------------------------------------------------
 
 query I
-SELECT count(*) FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/ATP.cif');
+SELECT count(*) FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/ATP.cif');
 ----
 63
 
