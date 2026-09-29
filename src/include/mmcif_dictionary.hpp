@@ -22,6 +22,10 @@ public:
 
 	// "_category.item" -> DuckDB type; unknown -> VARCHAR
 	LogicalType LookupType(const string &category, const string &column) const;
+	// Documentation page for a category in the bundled wwPDB v5.0 dictionary.
+	string GetCategoryUrl(const string &category) const;
+	// Documentation page for an item in the bundled wwPDB v5.0 dictionary.
+	string GetItemUrl(const string &category, const string &column) const;
 
 	const std::vector<std::pair<std::string, std::string>> &GetRelationships() const;
 

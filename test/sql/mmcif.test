@@ -4,6 +4,11 @@
 
 # Before the extension is loaded, the mmcif table functions do not exist
 statement error
+SELECT * FROM mmcif_columns('x.cif');
+----
+Catalog Error: Table Function with name mmcif_columns does not exist!
+
+statement error
 SELECT * FROM mmcif_tables('x.cif');
 ----
 Catalog Error: Table Function with name mmcif_tables does not exist!
@@ -16,18 +21,54 @@ Catalog Error: Table Function with name mmcif_relationships does not exist!
 # Require statement will ensure this test is run with this extension loaded
 require mmcif
 
+# The extension's table functions are discoverable through duckdb_functions():
+# each carries a description, real parameter names, an example and the mmcif
+# category.
+query TTT
+SELECT function_name, parameters, parameter_types FROM duckdb_functions() WHERE function_name LIKE 'mmcif%' ORDER BY function_name;
+----
+mmcif_columns	[file]	[VARCHAR]
+mmcif_relationships	[file]	[VARCHAR]
+mmcif_scan	[file, table]	[VARCHAR, VARCHAR]
+mmcif_tables	[file]	[VARCHAR]
+
+query TIII
+SELECT function_name, (description IS NOT NULL)::INT, len(examples), len(categories)
+FROM duckdb_functions() WHERE function_name LIKE 'mmcif%' ORDER BY function_name;
+----
+mmcif_columns	1	1	1
+mmcif_relationships	1	1	1
+mmcif_scan	1	1	1
+mmcif_tables	1	1	1
+
 # Global metadata table functions work without ATTACH
 query I
 SELECT count(*) FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/1amb_updated.cif');
 ----
+43
+
+query TTI
+SELECT table_name, comment, column_count FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/1amb_updated.cif') WHERE table_name='atom_site';
+----
+atom_site	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Categories/atom_site.html	21
+
+query I
+SELECT count(*) FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/1amb_updated.cif');
+----
 342
 
-query III
-SELECT table_name, column_name, column_type FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/1amb_updated.cif') WHERE table_name='atom_site' ORDER BY column_name LIMIT 3;
+query TTITT
+SELECT table_name, column_name, column_index, comment, data_type FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/1amb_updated.cif') WHERE table_name='atom_site' ORDER BY column_name LIMIT 3;
 ----
-atom_site	B_iso_or_equiv	DOUBLE
-atom_site	Cartn_x	DOUBLE
-atom_site	Cartn_y	DOUBLE
+atom_site	B_iso_or_equiv	15	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.B_iso_or_equiv.html	DOUBLE
+atom_site	Cartn_x	11	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.Cartn_x.html	DOUBLE
+atom_site	Cartn_y	12	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.Cartn_y.html	DOUBLE
+
+# Items missing from the local type index still receive their dictionary URL.
+query T
+SELECT comment FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/1amb_updated.cif') WHERE table_name='atom_site' AND column_name='id';
+----
+https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.id.html
 
 query I
 SELECT count(*) FROM mmcif_relationships('__WORKING_DIRECTORY__/test/data/1amb_updated.cif');
@@ -48,13 +89,20 @@ ATTACH '__WORKING_DIRECTORY__/test/data/1amb_updated.cif' AS mmcifdb (TYPE mmcif
 statement ok
 USE mmcifdb;
 
-# SHOW TABLES lists every category present in the file
-query T
-SELECT table_name FROM duckdb_tables() WHERE database_name='mmcifdb' ORDER BY table_name LIMIT 3;
+# Attached mmCIF columns expose their dictionary pages as catalog comments.
+query TT
+SELECT column_name, comment FROM duckdb_columns() WHERE database_name='mmcifdb' AND table_name='atom_site' AND column_name IN ('id', 'Cartn_x') ORDER BY column_index;
 ----
-atom_site
-atom_sites
-atom_type
+id	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.id.html
+Cartn_x	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.Cartn_x.html
+
+# SHOW TABLES lists every category present in the file
+query TT
+SELECT table_name, comment FROM duckdb_tables() WHERE database_name='mmcifdb' ORDER BY table_name LIMIT 3;
+----
+atom_site	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Categories/atom_site.html
+atom_sites	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Categories/atom_sites.html
+atom_type	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Categories/atom_type.html
 
 # The dictionary-driven column types come through the catalog
 query TT
@@ -95,7 +143,7 @@ SELECT count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/1amb_updated.ci
 
 # gzip'd mmcif files work the same way as uncompressed ones
 query I
-SELECT count(*) FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/1amb_updated.cif.gz');
+SELECT count(*) FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/1amb_updated.cif.gz');
 ----
 342
 
@@ -112,6 +160,12 @@ SELECT Cartn_x, type_symbol FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/1am
 
 statement ok
 ATTACH '__WORKING_DIRECTORY__/test/data/1amb_updated.cif.gz' AS gzdb (TYPE mmcif);
+
+# The attached file remains visible as the database path
+query T
+SELECT path FROM duckdb_databases() WHERE database_name = 'gzdb';
+----
+__WORKING_DIRECTORY__/test/data/1amb_updated.cif.gz
 
 statement ok
 USE gzdb;
@@ -160,6 +214,19 @@ ATTACH '__TEST_DIR__/mmcif_write.cif' AS wdb (TYPE mmcif, READ_WRITE TRUE);
 
 statement ok
 USE wdb;
+
+# Writable attachments expose the same catalog comments.
+query TT
+SELECT table_name, comment FROM duckdb_tables() WHERE database_name='wdb';
+----
+atom_site	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Categories/atom_site.html
+
+query TT
+SELECT column_name, comment FROM duckdb_columns() WHERE database_name='wdb' AND table_name='atom_site' ORDER BY column_index;
+----
+label_atom_id	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.label_atom_id.html
+Cartn_x	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.Cartn_x.html
+type_symbol	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.type_symbol.html
 
 # Initial contents
 query I
@@ -411,7 +478,7 @@ read-only
 # ---------------------------------------------------------------------------
 
 query I
-SELECT count(*) FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/ATP.cif');
+SELECT count(*) FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/ATP.cif');
 ----
 63
 

@@ -20,7 +20,7 @@ import sys
 import gzip
 
 SOURCE_URL = "https://mmcif.wwpdb.org/dictionaries/ascii/mmcif_pdbx_v50.dic"
-DIC_VERSION = "5.416"
+DIC_VERSION = "5.417"
 
 # dictionary type code -> DuckDB type (research 03 / ticket 03)
 NUMERIC_FLOAT = {"float", "float-range"}

@@ -65,6 +65,44 @@ curl -o test/data/1amb_updated.cif https://www.ebi.ac.uk/pdbe/entry-files/downlo
 
 See [docs/UPDATING.md](docs/UPDATING.md).
 
+## Updating the mmCIF dictionary
+
+When a new [PDBx/mmCIF dictionary](https://mmcif.wwpdb.org/pdbx-mmcif-home-page.html) version is released:
+
+1. Open the [wwPDB dictionary downloads page](https://mmcif.wwpdb.org/dictionaries/downloads.html).
+   Under **PDB Exchange Dictionary (PDBx/mmCIF) Version 5.0**, select
+   **Dictionary Text** (not the gzipped download) and save the file as
+   `mmcif_pdbx_v50.dic`. Alternatively, download it from the command line:
+
+   ```sh
+   curl --fail --location \
+       --output mmcif_pdbx_v50.dic \
+       https://mmcif.wwpdb.org/dictionaries/ascii/mmcif_pdbx_v50.dic
+   ```
+
+2. Update the dictionary metadata and URLs:
+
+   - Set `DIC_VERSION` in `scripts/generate_type_index.py` to the version in the
+     downloaded dictionary.
+   - If the download location changed, update `SOURCE_URL` in that script.
+   - If the dictionary path or filename changed, replace the documentation base
+     URL (`https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic`) everywhere
+     it occurs. This URL is used to build catalog comments in
+     `src/mmcif_dictionary.cpp` and is also present in `README.md` and the
+     expected results in `test/sql/mmcif.test`.
+
+3. Regenerate both checked-in dictionary artifacts:
+
+   ```sh
+   python3 scripts/generate_type_index.py \
+       mmcif_pdbx_v50.dic \
+       dict/mmcif_pdbx_v50_type_index.tsv.gz \
+       dict/mmcif_pdbx_v50_relationships.tsv.gz
+   ```
+
+4. Review the generated files and run `make test` and `make test_cpp` before
+   committing the script metadata and both files under `dict/` together.
+
 ## AI Declaration
 
 See [aidecl.yaml](aidecl.yaml) for details on the AI tools used in this repository.
