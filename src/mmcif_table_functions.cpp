@@ -376,13 +376,14 @@ static unique_ptr<FunctionData> MmcifRelationshipsBind(ClientContext &context, T
 // names, examples and category are discoverable through duckdb_functions().
 static void MmcifRegisterDescribed(ExtensionLoader &loader, TableFunction function, vector<string> parameter_names,
                                    string description, vector<string> examples) {
-	CreateTableFunctionInfo info(std::move(function));
-	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
 	FunctionDescription desc;
+	desc.parameter_types = function.arguments;
 	desc.parameter_names = std::move(parameter_names);
 	desc.description = std::move(description);
 	desc.examples = std::move(examples);
 	desc.categories = {"mmcif"};
+	CreateTableFunctionInfo info(std::move(function));
+	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
 }
