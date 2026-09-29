@@ -619,7 +619,10 @@ DatabaseSize MmcifCatalog::GetDatabaseSize(ClientContext &context) {
 }
 
 bool MmcifCatalog::InMemory() {
-	return true;
+	// The catalog metadata is materialized in memory, but the database itself is
+	// backed by the attached mmCIF file. DuckDB uses this return value to decide
+	// whether duckdb_databases().path should be NULL.
+	return false;
 }
 
 string MmcifCatalog::GetDBPath() {

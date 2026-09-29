@@ -131,6 +131,12 @@ SELECT Cartn_x, type_symbol FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/1am
 statement ok
 ATTACH '__WORKING_DIRECTORY__/test/data/1amb_updated.cif.gz' AS gzdb (TYPE mmcif);
 
+# The attached file remains visible as the database path
+query T
+SELECT path FROM duckdb_databases() WHERE database_name = 'gzdb';
+----
+__WORKING_DIRECTORY__/test/data/1amb_updated.cif.gz
+
 statement ok
 USE gzdb;
 
