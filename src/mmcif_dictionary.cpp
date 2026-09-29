@@ -77,6 +77,16 @@ LogicalType DictionaryIndex::LookupType(const string &category, const string &co
 	return LogicalType::VARCHAR;
 }
 
+string DictionaryIndex::GetItemUrl(const string &category, const string &column) const {
+	auto key = "_" + category + "." + column;
+	auto entry = types.find(key);
+	// Prefer the dictionary's canonical spelling when it is available. Some
+	// valid items (including _atom_site.id) are not present in the type index,
+	// so fall back to the spelling used by the file.
+	auto &item = entry != types.end() ? entry->first : key;
+	return "https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/" + item + ".html";
+}
+
 const std::vector<std::pair<std::string, std::string>> &DictionaryIndex::GetRelationships() const {
 	return relationships;
 }

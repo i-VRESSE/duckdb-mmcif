@@ -40,12 +40,18 @@ SELECT count(*) FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/1amb_updated
 ----
 342
 
-query TTIT
-SELECT table_name, column_name, column_index, data_type FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/1amb_updated.cif') WHERE table_name='atom_site' ORDER BY column_name LIMIT 3;
+query TTITT
+SELECT table_name, column_name, column_index, comment, data_type FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/1amb_updated.cif') WHERE table_name='atom_site' ORDER BY column_name LIMIT 3;
 ----
-atom_site	B_iso_or_equiv	15	DOUBLE
-atom_site	Cartn_x	11	DOUBLE
-atom_site	Cartn_y	12	DOUBLE
+atom_site	B_iso_or_equiv	15	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.B_iso_or_equiv.html	DOUBLE
+atom_site	Cartn_x	11	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.Cartn_x.html	DOUBLE
+atom_site	Cartn_y	12	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.Cartn_y.html	DOUBLE
+
+# Items missing from the local type index still receive their dictionary URL.
+query T
+SELECT comment FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/1amb_updated.cif') WHERE table_name='atom_site' AND column_name='id';
+----
+https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.id.html
 
 query I
 SELECT count(*) FROM mmcif_relationships('__WORKING_DIRECTORY__/test/data/1amb_updated.cif');
@@ -65,6 +71,13 @@ ATTACH '__WORKING_DIRECTORY__/test/data/1amb_updated.cif' AS mmcifdb (TYPE mmcif
 
 statement ok
 USE mmcifdb;
+
+# Attached mmCIF columns expose their dictionary pages as catalog comments.
+query TT
+SELECT column_name, comment FROM duckdb_columns() WHERE database_name='mmcifdb' AND table_name='atom_site' AND column_name IN ('id', 'Cartn_x') ORDER BY column_index;
+----
+id	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.id.html
+Cartn_x	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.Cartn_x.html
 
 # SHOW TABLES lists every category present in the file
 query T
@@ -184,6 +197,14 @@ ATTACH '__TEST_DIR__/mmcif_write.cif' AS wdb (TYPE mmcif, READ_WRITE TRUE);
 
 statement ok
 USE wdb;
+
+# Writable attachments expose the same catalog comments.
+query TT
+SELECT column_name, comment FROM duckdb_columns() WHERE database_name='wdb' AND table_name='atom_site' ORDER BY column_index;
+----
+label_atom_id	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.label_atom_id.html
+Cartn_x	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.Cartn_x.html
+type_symbol	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.type_symbol.html
 
 # Initial contents
 query I

@@ -308,7 +308,7 @@ static void MmcifMetaScan(ClientContext &context, TableFunctionInput &data, Data
 	output.SetCardinality(count);
 }
 
-// mmcif_columns(file): table_name, column_name, column_index, data_type
+// mmcif_columns(file): table_name, column_name, column_index, comment, data_type
 static unique_ptr<FunctionData> MmcifColumnsBind(ClientContext &context, TableFunctionBindInput &input,
                                                  vector<LogicalType> &return_types, vector<string> &names) {
 	auto file_name = input.inputs[0].GetValue<string>();
@@ -323,19 +323,22 @@ static unique_ptr<FunctionData> MmcifColumnsBind(ClientContext &context, TableFu
 		}
 		for (idx_t column_index = 0; column_index < cat->columns.size(); column_index++) {
 			auto &col = cat->columns[column_index];
-			auto type = DictionaryIndex::Get().LookupType(category, col);
+			auto &dictionary = DictionaryIndex::Get();
+			auto type = dictionary.LookupType(category, col);
 			vector<Value> row = {Value(category), Value(col), Value::INTEGER(NumericCast<int32_t>(column_index + 1)),
-			                     Value(type.ToString())};
+			                     Value(dictionary.GetItemUrl(category, col)), Value(type.ToString())};
 			result->rows.push_back(std::move(row));
 		}
 	}
 	names.emplace_back("table_name");
 	names.emplace_back("column_name");
 	names.emplace_back("column_index");
+	names.emplace_back("comment");
 	names.emplace_back("data_type");
 	return_types.push_back(LogicalType::VARCHAR);
 	return_types.push_back(LogicalType::VARCHAR);
 	return_types.push_back(LogicalType::INTEGER);
+	return_types.push_back(LogicalType::VARCHAR);
 	return_types.push_back(LogicalType::VARCHAR);
 	return std::move(result);
 }
@@ -405,7 +408,8 @@ void MmcifRegisterTableFunctions(ExtensionLoader &loader) {
 	                            MmcifMetaInitGlobal);
 	mmcif_columns.projection_pushdown = true;
 	MmcifRegisterDescribed(loader, std::move(mmcif_columns), {"file"},
-	                       "List the categories and columns (with their dictionary-inferred types) in an mmCIF file.",
+	                       "List the categories and columns in an mmCIF file, with their dictionary documentation "
+	                       "links and inferred types.",
 	                       {"SELECT * FROM mmcif_columns('https://files.rcsb.org/download/1AMB.cif.gz'); "
 	                        "-- 342 rows"});
 

@@ -385,6 +385,13 @@ void MmcifSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	throw BinderException("mmcif databases are read-only - cannot ALTER");
 }
 
+static ColumnDefinition MmcifColumnDefinition(DictionaryIndex &dictionary, const string &table_name,
+                                              const string &column_name) {
+	ColumnDefinition result(column_name, dictionary.LookupType(table_name, column_name));
+	result.SetComment(Value(dictionary.GetItemUrl(table_name, column_name)));
+	return result;
+}
+
 MmcifTableEntry &MmcifSchemaEntry::GetTableEntry(CatalogTransaction transaction, const string &entry_name) {
 	// Cache: reuse an existing entry instead of replacing it. Scans keep a raw
 	// pointer to the returned MmcifTableEntry in their bind data; replacing the
@@ -402,7 +409,7 @@ MmcifTableEntry &MmcifSchemaEntry::GetTableEntry(CatalogTransaction transaction,
 		auto store = this->catalog->GetWriteStore();
 		auto cat = MmcifGetWriteCategory(*store, entry_name);
 		for (auto &col : cat->columns) {
-			info.columns.AddColumn(ColumnDefinition(col, dict.LookupType(entry_name, col)));
+			info.columns.AddColumn(MmcifColumnDefinition(dict, entry_name, col));
 		}
 	} else {
 		auto index = this->catalog->GetIndex(transaction.context);
@@ -412,7 +419,7 @@ MmcifTableEntry &MmcifSchemaEntry::GetTableEntry(CatalogTransaction transaction,
 			                      file_name.c_str());
 		}
 		for (auto &col : cat->columns) {
-			info.columns.AddColumn(ColumnDefinition(col, dict.LookupType(entry_name, col)));
+			info.columns.AddColumn(MmcifColumnDefinition(dict, entry_name, col));
 		}
 	}
 	auto entry = make_uniq<MmcifTableEntry>(catalog, *this, info, file_name, entry_name, this->catalog);
