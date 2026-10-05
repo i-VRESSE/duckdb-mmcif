@@ -231,14 +231,14 @@ TEST_CASE("MmcifIndex indexes loop + single-tag, decodes values, keeps first dat
 	REQUIRE(srow[ColIndex(*ssingle, "tag4")] == "quoted value");
 }
 
-TEST_CASE("MmcifIndex terminates loop data on a comment line", "[mmcif][index]") {
+TEST_CASE("MmcifIndex keeps loop data that follows a comment line", "[mmcif][index]") {
 	std::string cif = "data_b\n"
 	                  "loop_\n"
 	                  "_c.x\n"
 	                  "1\n"
 	                  "2\n"
-	                  "# comment ends the loop\n"
-	                  "stray top-level line\n";
+	                  "# comment inside the loop\n"
+	                  "3\n";
 	TempCif fixture("idx_comment.cif", cif);
 
 	auto index = MmcifIndex::Load(fixture.Str(), nullptr);
@@ -246,11 +246,93 @@ TEST_CASE("MmcifIndex terminates loop data on a comment line", "[mmcif][index]")
 	auto *c = index->FindCategory("c");
 	REQUIRE(c);
 	REQUIRE(c->is_loop);
-	REQUIRE(index->GetRowCount(*c) == 2);
-	// the stray line after the comment must not become a category
-	vector<string> names;
-	index->GetCategoryNames(names);
-	REQUIRE(names.size() == 1);
+	// A comment sits between values - it does not end the loop, so the row
+	// after it is still loop data (it used to be dropped here).
+	REQUIRE(index->GetRowCount(*c) == 3);
+
+	// The comment itself is retained, anchored to the row that followed it.
+	auto store = index->Materialize();
+	REQUIRE(store->comments.size() == 1);
+	REQUIRE(store->comments[0].anchor == MmcifCommentAnchor::LOOP_ROW);
+	REQUIRE(store->comments[0].category == "c");
+	REQUIRE(store->comments[0].row == 2);
+	REQUIRE(store->comments[0].text == "# comment inside the loop");
+}
+
+TEST_CASE("MmcifIndex anchors every comment to what it sits in front of", "[mmcif][index][comments]") {
+	std::string cif = "# preamble one\n"
+	                  "# preamble two\n"
+	                  "data_b\n"
+	                  "# before the category\n"
+	                  "_entry.id   B\n"
+	                  "# before the second item\n"
+	                  "_entry.title   Something\n"
+	                  "# before the loop\n"
+	                  "loop_\n"
+	                  "_c.x\n"
+	                  "# inside the loop header\n"
+	                  "_c.y\n"
+	                  "1 2\n"
+	                  "# between rows\n"
+	                  "3 4\n"
+	                  "# trailing\n";
+	TempCif fixture("idx_anchors.cif", cif);
+
+	auto index = MmcifIndex::Load(fixture.Str(), nullptr);
+	REQUIRE(index);
+
+	std::vector<std::string> got;
+	for (auto &c : index->GetComments()) {
+		std::string anchor;
+		switch (c.anchor) {
+		case MmcifCommentAnchor::BLOCK_HEADER:
+			anchor = "BLOCK_HEADER";
+			break;
+		case MmcifCommentAnchor::CATEGORY:
+			anchor = "CATEGORY(" + c.category + ")";
+			break;
+		case MmcifCommentAnchor::ITEM:
+			anchor = "ITEM(" + c.category + "." + c.item + ")";
+			break;
+		case MmcifCommentAnchor::LOOP_ROW:
+			anchor = "LOOP_ROW(" + c.category + "," + std::to_string(c.row) + ")";
+			break;
+		case MmcifCommentAnchor::TRAILER:
+			anchor = "TRAILER";
+			break;
+		}
+		got.push_back(anchor + " " + c.text);
+	}
+	std::vector<std::string> expected = {
+	    "BLOCK_HEADER # preamble one",           "BLOCK_HEADER # preamble two",
+	    "CATEGORY(entry) # before the category", "ITEM(entry.title) # before the second item",
+	    "CATEGORY(c) # before the loop",         "ITEM(c.y) # inside the loop header",
+	    "LOOP_ROW(c,1) # between rows",          "TRAILER # trailing",
+	};
+	REQUIRE(got == expected);
+}
+
+TEST_CASE("MmcifIndex closes loop data before a single-tag category", "[mmcif][index]") {
+	// A loop followed straight by a single-tag line of another category (no
+	// blank or comment between) used to finalize the loop before its data_end
+	// was set, leaving the loop with no data at all.
+	std::string cif = "data_b\n"
+	                  "loop_\n"
+	                  "_a.x\n"
+	                  "1\n"
+	                  "2\n"
+	                  "_b.y 9\n";
+	TempCif fixture("idx_loop_then_single.cif", cif);
+
+	auto index = MmcifIndex::Load(fixture.Str(), nullptr);
+	REQUIRE(index);
+	auto *a = index->FindCategory("a");
+	REQUIRE(a);
+	REQUIRE(index->GetRowCount(*a) == 2);
+	auto *b = index->FindCategory("b");
+	REQUIRE(b);
+	REQUIRE(!b->is_loop);
+	REQUIRE(index->GetRowCount(*b) == 1);
 }
 
 TEST_CASE("MmcifIndex counts and materializes a partial trailing row", "[mmcif][index]") {
@@ -282,6 +364,36 @@ TEST_CASE("MmcifIndex::FindCategory returns null for a missing category", "[mmci
 	auto index = MmcifIndex::Load(fixture.Str(), nullptr);
 	REQUIRE(index);
 	REQUIRE(index->FindCategory("nope") == nullptr);
+}
+
+TEST_CASE("MmcifIndex anchors repeated in-loop comments to the right rows", "[mmcif][index][comments]") {
+	std::string cif = "data_b\n"
+	                  "loop_\n"
+	                  "_c.x\n"
+	                  "_c.y\n"
+	                  "1 2\n"
+	                  "# before row 1\n"
+	                  "3 4\n"
+	                  "5 6\n"
+	                  "# before row 3\n"
+	                  "# still before row 3\n"
+	                  "7 8\n";
+	TempCif fixture("idx_multi_row_comments.cif", cif);
+
+	auto index = MmcifIndex::Load(fixture.Str(), nullptr);
+	REQUIRE(index);
+	auto *c = index->FindCategory("c");
+	REQUIRE(c);
+	REQUIRE(index->GetRowCount(*c) == 4);
+
+	std::vector<std::string> got;
+	for (auto &comment : index->GetComments()) {
+		REQUIRE(comment.anchor == MmcifCommentAnchor::LOOP_ROW);
+		REQUIRE(comment.category == "c");
+		got.push_back(std::to_string(comment.row) + " " + comment.text);
+	}
+	std::vector<std::string> expected = {"1 # before row 1", "3 # before row 3", "3 # still before row 3"};
+	REQUIRE(got == expected);
 }
 
 // ---------------------------------------------------------------------------
@@ -426,6 +538,129 @@ TEST_CASE("MmcifWriteCif round-trips through the index", "[mmcif][writer][roundt
 	auto r1 = reread->GetRow(*ratom, 1);
 	REQUIRE(r1[ColIndex(*ratom, "id")] == "2");
 	REQUIRE(r1[ColIndex(*ratom, "name")] == "beta two");
+}
+
+// ---------------------------------------------------------------------------
+// Comments table write-back (write mode used to drop every '#' line)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::vector<std::string> CommentLines(const std::string &text) {
+	std::vector<std::string> lines;
+	std::istringstream stream(text);
+	std::string line;
+	while (std::getline(stream, line)) {
+		if (!line.empty() && line[0] == '#') {
+			lines.push_back(line);
+		}
+	}
+	return lines;
+}
+
+MmcifComment MakeComment(MmcifCommentAnchor anchor, const std::string &category, const std::string &item, idx_t row,
+                         const std::string &text) {
+	MmcifComment comment;
+	comment.anchor = anchor;
+	comment.category = category;
+	comment.item = item;
+	comment.row = row;
+	comment.text = text;
+	return comment;
+}
+
+} // namespace
+
+TEST_CASE("MmcifWriteCif writes retained comments back where they belong", "[mmcif][writer][comments]") {
+	std::string cif = "# preamble\n"
+	                  "data_b\n"
+	                  "# before entry\n"
+	                  "_entry.id   B\n"
+	                  "# before the second item\n"
+	                  "_entry.title   Something\n"
+	                  "# before the loop\n"
+	                  "loop_\n"
+	                  "_c.x\n"
+	                  "# inside the loop header\n"
+	                  "_c.y\n"
+	                  "1 2\n"
+	                  "# between rows\n"
+	                  "3 4\n"
+	                  "# trailing\n";
+	TempCif fixture("comments_roundtrip.cif", cif);
+	auto store = MmcifIndex::Load(fixture.Str(), nullptr)->Materialize();
+	REQUIRE(store->comments.size() == 7);
+
+	auto out = WriteToString(*store);
+	// Nothing is lost and the order is kept...
+	REQUIRE(CommentLines(out) == CommentLines(cif));
+	// ... and each line lands in front of the element it annotates.
+	REQUIRE(Contains(out, "# preamble\ndata_b\n"));
+	REQUIRE(Contains(out, "# before entry\n_entry.id"));
+	REQUIRE(Contains(out, "# before the second item\n_entry.title"));
+	REQUIRE(Contains(out, "# before the loop\nloop_\n"));
+	REQUIRE(Contains(out, "# inside the loop header\n_c.y"));
+	REQUIRE(Contains(out, "# between rows\n3 4 \n"));
+	REQUIRE(out.compare(out.size() - 11, 11, "# trailing\n") == 0);
+}
+
+TEST_CASE("MmcifWriteCif keeps comments in place across an INSERT", "[mmcif][writer][comments]") {
+	std::string cif = "data_b\n"
+	                  "# before the loop\n"
+	                  "loop_\n"
+	                  "_c.x\n"
+	                  "1\n"
+	                  "# between rows\n"
+	                  "2\n";
+	TempCif fixture("comments_insert.cif", cif);
+	auto store = MmcifIndex::Load(fixture.Str(), nullptr)->Materialize();
+	store->AddRow(*store->FindCategory("c"), {"3"});
+
+	auto out = WriteToString(*store);
+	// The anchored comments keep their positions; the new row lands after them.
+	REQUIRE(Contains(out, "# before the loop\nloop_\n"));
+	REQUIRE(Contains(out, "# between rows\n2 \n"));
+	REQUIRE(Contains(out, "2 \n3 \n"));
+}
+
+TEST_CASE("MmcifWriteCif clamps comments of deleted rows to the end of the loop", "[mmcif][writer][comments]") {
+	MmcifWriteStore store;
+	store.data_block_name = "b";
+	MmcifWriteCategory cat;
+	cat.name = "c";
+	cat.is_loop = true;
+	cat.columns = {"x"};
+	cat.rows = {{"1"}};
+	store.categories.push_back(cat);
+	// Anchored in front of a row that has since been deleted.
+	store.comments.push_back(MakeComment(MmcifCommentAnchor::LOOP_ROW, "c", "", 7, "# orphan"));
+
+	auto out = WriteToString(store);
+	REQUIRE(Contains(out, "1 \n# orphan\n"));
+}
+
+TEST_CASE("MmcifWriteCif drops the comments of a category with no rows left", "[mmcif][writer][comments]") {
+	MmcifWriteStore store;
+	store.data_block_name = "b";
+	MmcifWriteCategory cat;
+	cat.name = "gone";
+	cat.is_loop = true;
+	cat.columns = {"x"};
+	store.categories.push_back(cat);
+	store.comments.push_back(MakeComment(MmcifCommentAnchor::CATEGORY, "gone", "", 0, "# note about gone"));
+
+	auto out = WriteToString(store);
+	// writeEmptyTables=false: the category is not written, so its comments go with it.
+	REQUIRE(out.find("gone") == std::string::npos);
+}
+
+TEST_CASE("MmcifWriteCif emits the generated separator when nothing was retained", "[mmcif][writer][comments]") {
+	auto store = MakeLoopStore("b", "c", {"x"}, {{"1"}});
+	REQUIRE(store.comments.empty());
+	auto out = WriteToString(store);
+	// Comment-free stores write exactly the old "# " separators.
+	REQUIRE(Contains(out, "data_b\n# \nloop_\n"));
+	REQUIRE(out.compare(out.size() - 3, 3, "# \n") == 0);
 }
 
 // ---------------------------------------------------------------------------

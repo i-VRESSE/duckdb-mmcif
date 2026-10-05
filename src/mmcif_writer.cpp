@@ -6,13 +6,16 @@
 
 #include "mmcif_writer.hpp"
 
+#include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/typedefs.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <ostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace duckdb {
@@ -252,21 +255,131 @@ static void MmcifPrintItemValue(std::ostream &cifo, const string &itemValue, idx
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Comments table lookup (see mmcif_comments.hpp)
+//
+// Groups the store's retained comment lines by the position they are emitted
+// in front of, so writing a category is still one straight pass over its data.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+using RowComment = std::pair<idx_t, const MmcifComment *>;
+
+void EmitComments(std::ostream &cifo, const std::vector<const MmcifComment *> &comments) {
+	for (auto *comment : comments) {
+		cifo << comment->text << "\n";
+	}
+}
+
+// Cursor over one loop's row-anchored comments. Comments anchored to a row that
+// no longer exists (deleted) are flushed by EmitRest, so they trail the loop
+// instead of disappearing.
+struct MmcifRowCommentCursor {
+	const std::vector<RowComment> *entries = nullptr;
+	idx_t pos = 0;
+
+	void EmitBefore(std::ostream &cifo, idx_t row) {
+		while (entries && pos < entries->size() && (*entries)[pos].first <= row) {
+			cifo << (*entries)[pos].second->text << "\n";
+			pos++;
+		}
+	}
+	void EmitRest(std::ostream &cifo) {
+		while (entries && pos < entries->size()) {
+			cifo << (*entries)[pos].second->text << "\n";
+			pos++;
+		}
+	}
+};
+
+class MmcifCommentLookup {
+public:
+	explicit MmcifCommentLookup(const MmcifWriteStore &store) {
+		for (auto &comment : store.comments) {
+			switch (comment.anchor) {
+			case MmcifCommentAnchor::BLOCK_HEADER:
+				block_header.push_back(&comment);
+				break;
+			case MmcifCommentAnchor::TRAILER:
+				trailer.push_back(&comment);
+				break;
+			case MmcifCommentAnchor::CATEGORY:
+				by_category[comment.category].push_back(&comment);
+				break;
+			case MmcifCommentAnchor::ITEM:
+				by_item[comment.category + "." + comment.item].push_back(&comment);
+				break;
+			case MmcifCommentAnchor::LOOP_ROW:
+				by_row[comment.category].push_back(std::make_pair(comment.row, &comment));
+				break;
+			}
+		}
+		for (auto &entry : by_row) {
+			std::stable_sort(entry.second.begin(), entry.second.end(),
+			                 [](const RowComment &a, const RowComment &b) { return a.first < b.first; });
+		}
+	}
+
+	const std::vector<const MmcifComment *> &BlockHeader() const {
+		return block_header;
+	}
+	const std::vector<const MmcifComment *> &Trailer() const {
+		return trailer;
+	}
+	// nullptr when the position carries no retained comments.
+	const std::vector<const MmcifComment *> *ForCategory(const string &category) const {
+		auto it = by_category.find(category);
+		return it == by_category.end() ? nullptr : &it->second;
+	}
+	const std::vector<const MmcifComment *> *ForItem(const string &category, const string &item) const {
+		auto it = by_item.find(category + "." + item);
+		return it == by_item.end() ? nullptr : &it->second;
+	}
+	MmcifRowCommentCursor Rows(const string &category) const {
+		MmcifRowCommentCursor cursor;
+		auto it = by_row.find(category);
+		if (it != by_row.end()) {
+			cursor.entries = &it->second;
+		}
+		return cursor;
+	}
+
+private:
+	std::vector<const MmcifComment *> block_header;
+	std::vector<const MmcifComment *> trailer;
+	case_insensitive_map_t<std::vector<const MmcifComment *>> by_category;
+	case_insensitive_map_t<std::vector<const MmcifComment *>> by_item;
+	case_insensitive_map_t<std::vector<RowComment>> by_row;
+};
+
+} // namespace
+
 // Port of CifFile::Write(ostream, tables, writeEmptyTables=false) with
 // smartPrint disabled. Emits one data block (the write store keeps only the
-// first data block), skipping empty categories.
+// first data block), skipping empty categories. Retained comment lines are
+// written back at their anchors; where a category has none of its own, the
+// generated "# " separator is used, so a comment-free store emits exactly
+// what it used to.
 void MmcifWriteCif(std::ostream &cifo, const MmcifWriteStore &store) {
 	const string nullValue = "?";
 	const string quotes = "\'";
+	const MmcifCommentLookup comments(store);
 
+	EmitComments(cifo, comments.BlockHeader());
 	cifo << "data_" << store.data_block_name << "\n";
 	for (auto &cat : store.categories) {
 		idx_t numRow = cat.rows.size();
 		idx_t numColumn = cat.columns.size();
 		if (numRow == 0) {
-			continue; // writeEmptyTables=false
+			continue; // writeEmptyTables=false; the category's comments go with it
 		}
-		cifo << "# \n";
+		auto *category_comments = comments.ForCategory(cat.name);
+		if (category_comments) {
+			EmitComments(cifo, *category_comments);
+		} else {
+			cifo << "# \n";
+		}
 		if (numRow <= 1 && !cat.is_loop) {
 			// Single-row category: item/value pairs, aligned to the longest item.
 			idx_t longestNameIndex = 0;
@@ -280,6 +393,10 @@ void MmcifWriteCif(std::ostream &cifo, const MmcifWriteStore &store) {
 			string longestCifItem = "_" + cat.name + "." + cat.columns[longestNameIndex];
 			const std::vector<string> &rowValues = cat.rows[0];
 			for (idx_t i = 0; i < numColumn; i++) {
+				auto *item_comments = comments.ForItem(cat.name, cat.columns[i]);
+				if (item_comments) {
+					EmitComments(cifo, *item_comments);
+				}
 				idx_t linePos = 0;
 				string cifItem = "_" + cat.name + "." + cat.columns[i];
 				cifo << cifItem;
@@ -299,6 +416,10 @@ void MmcifWriteCif(std::ostream &cifo, const MmcifWriteStore &store) {
 			// Loop category.
 			cifo << "loop_\n";
 			for (idx_t i = 0; i < numColumn; i++) {
+				auto *item_comments = comments.ForItem(cat.name, cat.columns[i]);
+				if (item_comments) {
+					EmitComments(cifo, *item_comments);
+				}
 				idx_t linePos = 0;
 				string cifItem = "_" + cat.name + "." + cat.columns[i];
 				cifo << cifItem;
@@ -320,7 +441,9 @@ void MmcifWriteCif(std::ostream &cifo, const MmcifWriteStore &store) {
 					}
 				}
 			}
+			auto row_comments = comments.Rows(cat.name);
 			for (idx_t l = 0; l < numRow; l++) {
+				row_comments.EmitBefore(cifo, l);
 				const auto &row = cat.rows[l];
 				idx_t linePos = 0;
 				for (idx_t i = 0; i < numColumn; i++) {
@@ -331,9 +454,16 @@ void MmcifWriteCif(std::ostream &cifo, const MmcifWriteStore &store) {
 					cifo << "\n";
 				}
 			}
+			// Comments anchored to rows that no longer exist trail the loop
+			// instead of being dropped with those rows.
+			row_comments.EmitRest(cifo);
 		}
 	}
-	cifo << "# \n";
+	if (!comments.Trailer().empty()) {
+		EmitComments(cifo, comments.Trailer());
+	} else {
+		cifo << "# \n";
+	}
 }
 
 } // namespace duckdb

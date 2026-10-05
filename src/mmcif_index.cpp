@@ -4,6 +4,9 @@
 #include "duckdb/common/gzip_file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 
+#include <fstream>
+#include <string>
+
 #include "mmcif_file.hpp"
 
 namespace duckdb {
@@ -18,31 +21,49 @@ namespace duckdb {
 static mutex g_index_cache_lock;
 static unordered_map<string, weak_ptr<MmcifIndex>> g_index_cache;
 
-// Local-file staleness check: (mtime, size) changed since the cached copy.
+// Per-path file stamps used to skip stat on unchanged files. Hoisted out of
+// MmcifFileChanged so InvalidateCache can drop a stamp after a write-back.
+static mutex g_stamp_lock;
+static case_insensitive_map_t<string> g_stamps;
+
+// Stamp a local file. Returns "" when the file is missing (treated as
+// "changed"). With a context the stamp comes from DuckDB's VFS (mtime+size);
+// without one (write-mode loads) a context-free size-only stat is used.
+static string MmcifFileStampKey(const string &path, optional_ptr<ClientContext> context) {
+	if (context) {
+		auto &fs = FileSystem::GetFileSystem(*context);
+		if (!fs.FileExists(path)) {
+			return "";
+		}
+		auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
+		auto mtime = fs.GetLastModifiedTime(*handle);
+		auto size = fs.GetFileSize(*handle);
+		return StringUtil::Format("%s|%ld|%lld", path, (long)mtime.value, (long long)size);
+	}
+	std::ifstream in(path.c_str(), std::ios::binary | std::ios::ate);
+	if (!in) {
+		return "";
+	}
+	auto end = in.tellg();
+	return StringUtil::Format("%s|size|%lld", path, (long long)end);
+}
+
+// Local-file staleness check: stamp changed since the cached copy. Remote
+// paths cannot be cheaply stat'd and are cached by path only (may be stale).
 static bool MmcifFileChanged(const string &path, optional_ptr<ClientContext> context) {
 	if (MmcifFile::IsRemotePath(path)) {
-		return false; // cannot cheaply stat remote paths
-	}
-	if (!context) {
 		return false;
 	}
-	auto &fs = FileSystem::GetFileSystem(*context);
-	if (!fs.FileExists(path)) {
-		return true;
+	auto key = MmcifFileStampKey(path, context);
+	if (key.empty()) {
+		return true; // file missing -> treat as changed
 	}
-	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
-	auto mtime = fs.GetLastModifiedTime(*handle);
-	auto size = fs.GetFileSize(*handle);
-	auto key = StringUtil::Format("%s|%ld|%lld", path, (long)mtime.value, (long long)size);
-	// Cache the stamp per path so a re-attach with an unchanged file skips stat.
-	static mutex stamp_lock;
-	static case_insensitive_map_t<string> stamps;
-	lock_guard<mutex> l(stamp_lock);
-	auto it = stamps.find(path);
-	if (it != stamps.end() && it->second == key) {
+	lock_guard<mutex> l(g_stamp_lock);
+	auto it = g_stamps.find(path);
+	if (it != g_stamps.end() && it->second == key) {
 		return false;
 	}
-	stamps[path] = key;
+	g_stamps[path] = key;
 	return true;
 }
 
@@ -68,14 +89,22 @@ shared_ptr<MmcifIndex> MmcifIndex::Load(const string &path, optional_ptr<ClientC
 	}
 	// Append a dummy trailing data block so the parser's "last loop" is flushed
 	// (same trick the RCSB path used); the index keeps only the FIRST data block.
+	idx_t original_text_size = text.size();
 	text += "\ndata_zzz_prototype\n#\n";
 
-	auto index = shared_ptr<MmcifIndex>(new MmcifIndex(std::move(raw), std::move(text)));
+	auto index = shared_ptr<MmcifIndex>(new MmcifIndex(std::move(raw), std::move(text), original_text_size));
 	index->Build();
 
 	lock_guard<mutex> l(g_index_cache_lock);
 	g_index_cache[path] = weak_ptr<MmcifIndex>(index);
 	return index;
+}
+
+void MmcifIndex::InvalidateCache(const string &path) {
+	lock_guard<mutex> l(g_index_cache_lock);
+	g_index_cache.erase(path);
+	lock_guard<mutex> sl(g_stamp_lock);
+	g_stamps.erase(path);
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +174,58 @@ void MmcifIndex::Build() {
 		cur = nullptr;
 	};
 
+	// Comment lines seen since the previous structural element. A comment is
+	// anchored to the element that follows it, which is only known once that
+	// line is read, so they pile up here until attach_comments() can bind them.
+	vector<string> pending;
+
+	auto attach_comments = [&](MmcifCommentAnchor anchor, const string &category, const string &item, idx_t row) {
+		if (pending.empty()) {
+			return;
+		}
+		for (auto &text : pending) {
+			MmcifComment comment;
+			comment.anchor = anchor;
+			comment.category = category;
+			comment.item = item;
+			comment.row = row;
+			comment.text = std::move(text);
+			comments.push_back(std::move(comment));
+		}
+		pending.clear();
+	};
+
+	// Row index of the loop row that starts at `offset`: value-count the loop
+	// range in front of it. The count resumes where the previous call stopped,
+	// so a loop with many comments is still scanned once, not once per comment.
+	// Nothing is counted until a comment actually needs it, keeping the pass-1
+	// scan of the (common) comment-free loop free of any value parsing.
+	idx_t counted_data_start = 0; // the loop range the counters below belong to
+	idx_t counted_offset = 0;
+	idx_t counted_values = 0;
+	auto loop_row_at = [&](const MmcifCategory &cat, idx_t offset) -> idx_t {
+		idx_t loop_ncols = cat.loop_col_map.size();
+		if (loop_ncols == 0) {
+			return 0;
+		}
+		if (counted_data_start != cat.data_start || offset < counted_offset) {
+			counted_data_start = cat.data_start; // a different loop: restart
+			counted_offset = cat.data_start;
+			counted_values = 0;
+		}
+		if (offset > counted_offset) {
+			MmcifValueCursor counter(content_data, counted_offset, offset);
+			const char *out;
+			idx_t len;
+			bool is_null;
+			while (counter.Next(&out, &len, &is_null)) {
+				counted_values++;
+			}
+			counted_offset = offset;
+		}
+		return counted_values / loop_ncols;
+	};
+
 	idx_t line_start = 0;
 	idx_t skip_to = 0; // when > line_end, the loop jumps to this line start
 	while (line_start < size) {
@@ -156,18 +237,20 @@ void MmcifIndex::Build() {
 		if (s < line_end) {
 			char c = base[s];
 			if (c == '#') {
-				// Comment line: terminates loop data.
-				if (state == LOOP_DATA && cur) {
-					cur->data_end = line_start;
-					state = TOP;
-				}
+				// Comment line: kept verbatim and anchored to whatever
+				// structural element follows it. It does NOT end the loop it
+				// sits in - mmCIF comments sit between values, so the rows
+				// after a comment still belong to that loop.
+				pending.push_back(string(base + line_start, line_end - line_start));
 			} else if (c == '_') {
 				// Tag line.
 				string cat, item;
+				bool starts_category = false;
 				if (MmcifSplitTag(base, s, line_end - s, cat, item)) {
 					if (state == LOOP_HEADER) {
 						// Loop header: this line is a column tag.
-						if (!cur || cur->name != cat) {
+						starts_category = !cur || cur->name != cat;
+						if (starts_category) {
 							finalize();
 							cur = make_uniq<MmcifCategory>();
 							cur->name = cat;
@@ -187,8 +270,15 @@ void MmcifIndex::Build() {
 						}
 						cur->loop_col_map.push_back(full_col);
 					} else {
-						// Single-tag line "_cat.item value".
-						if (!cur || cur->name != cat) {
+						// Single-tag line "_cat.item value". A running loop ends
+						// here: close it while it is still `cur`, because the
+						// finalize() below moves it out of data_end's reach.
+						if (state == LOOP_DATA && cur) {
+							cur->data_end = line_start;
+							state = TOP;
+						}
+						starts_category = !cur || cur->name != cat;
+						if (starts_category) {
 							finalize();
 							cur = make_uniq<MmcifCategory>();
 							cur->name = cat;
@@ -292,6 +382,13 @@ void MmcifIndex::Build() {
 						cur->singles.push_back(cell);
 						skip_to = value_consumed_until;
 					}
+					// The comments in front of this tag line sit on it: the
+					// first line of a category, or this item's own line.
+					if (starts_category) {
+						attach_comments(MmcifCommentAnchor::CATEGORY, cat, string(), 0);
+					} else {
+						attach_comments(MmcifCommentAnchor::ITEM, cat, item, 0);
+					}
 				}
 				if (state != LOOP_HEADER) {
 					if (state == LOOP_DATA && cur) {
@@ -313,26 +410,57 @@ void MmcifIndex::Build() {
 				if (!indexed) {
 					data_block_name.assign(base + s + 5, (line_end - s) - 5);
 					indexed = true;
+					// Comments above the first data_ line are the block preamble.
+					attach_comments(MmcifCommentAnchor::BLOCK_HEADER, string(), string(), 0);
 				} else {
-					// Later data blocks are ignored (keep-first-block behavior).
+					// Later data blocks are ignored (keep-first-block behavior),
+					// but record them so write-mode attach refuses to write
+					// back a file whose extra blocks would be silently dropped.
+					// The synthetic "data_zzz_prototype" flush block appended by
+					// Load is a parser artifact, not file content.
+					if (line_start < original_text_size) {
+						has_multiple_blocks = true;
+					}
+					// This break ends the first data block: anything still
+					// pending is the block's trailing comments.
+					attach_comments(MmcifCommentAnchor::TRAILER, string(), string(), 0);
 					break;
 				}
 				state = TOP;
+			} else if (MmcifStartsWith(base, s, line_end, "save_")) {
+				// save_ frame (save_xxx ... save_): not representable in the
+				// write store, so flag it and stop the current loop.
+				has_save_frames = true;
+				if (state == LOOP_DATA && cur) {
+					cur->data_end = line_start;
+				}
+				finalize();
+				state = TOP;
 			} else if (state == LOOP_HEADER) {
-				// First data line of a loop: data begins.
+				// First data line of a loop: data begins. Comments held back
+				// since the loop header sit in front of the first row.
 				if (!cur) {
 					cur = make_uniq<MmcifCategory>();
 					cur->is_loop = true;
 				}
+				attach_comments(MmcifCommentAnchor::LOOP_ROW, cur->name, string(), 0);
 				cur->data_start = line_start;
 				state = LOOP_DATA;
 			} else if (state == LOOP_DATA) {
-				// Continuation data line: nothing to record.
+				// Continuation data line. A comment held back in front of it
+				// sits inside the loop, anchored to the row this line starts.
+				// The row count is only computed when comments are actually
+				// pending, so a plain loop scan stays a single pass.
+				if (cur && !pending.empty()) {
+					attach_comments(MmcifCommentAnchor::LOOP_ROW, cur->name, string(), loop_row_at(*cur, line_start));
+				}
 			} else {
 				// TOP with a stray non-tag line: ignore.
 			}
 		} else {
-			// Blank line: terminates loop data.
+			// Blank line: terminates loop data. Pending comments stay pending -
+			// they are emitted in front of the next element, which keeps them
+			// visually where they were: between the loop and what follows it.
 			if (state == LOOP_DATA && cur) {
 				cur->data_end = line_start;
 				state = TOP;
@@ -346,6 +474,8 @@ void MmcifIndex::Build() {
 		}
 	}
 	finalize();
+	// Out of file: whatever is still pending trails the data block.
+	attach_comments(MmcifCommentAnchor::TRAILER, string(), string(), 0);
 }
 
 MmcifCategory *MmcifIndex::FindCategory(const string &name) {

@@ -481,6 +481,12 @@ MmcifCatalog::MmcifCatalog(AttachedDatabase &db_p, string path_p, bool write_mod
     : Catalog(db_p), path(std::move(path_p)), write_mode(write_mode_p) {
 	if (write_mode) {
 		write_store = MmcifFile::LoadWriteStore(path, nullptr);
+		if (write_store->HasUnrepresentableContent()) {
+			throw InvalidInputException(
+			    "mmcif: '%s' cannot be attached with READ_WRITE - the file contains multiple data blocks or save "
+			    "frames that write mode cannot write back without losing them",
+			    path.c_str());
+		}
 	}
 }
 
@@ -503,18 +509,28 @@ shared_ptr<MmcifIndex> MmcifCatalog::GetIndex(optional_ptr<ClientContext> contex
 	return index;
 }
 
-void MmcifCatalog::ReloadFromDisk() {
+void MmcifCatalog::ReloadFromDisk(optional_ptr<ClientContext> context) {
 	if (!write_mode) {
 		return;
 	}
-	write_store = MmcifFile::LoadWriteStore(path, nullptr);
+	write_store = MmcifFile::LoadWriteStore(path, context);
 }
 
 void MmcifCatalog::Persist(ClientContext &context) {
 	if (!write_mode || !write_store) {
 		return;
 	}
+	if (!write_store->IsDirty()) {
+		// Read-only / no-op transactions never rewrite the file.
+		return;
+	}
+	if (write_store->HasUnrepresentableContent()) {
+		throw IOException("mmcif: cannot commit write-back of '%s' - the file contains multiple data blocks or save "
+		                  "frames that write mode cannot preserve",
+		                  path.c_str());
+	}
 	MmcifFile::Persist(*write_store, path, context);
+	write_store->ClearDirty();
 }
 
 void MmcifCatalog::Initialize(bool load_builtin) {
@@ -666,8 +682,11 @@ ErrorData MmcifTransactionManager::CommitTransaction(ClientContext &context, Tra
 }
 
 void MmcifTransactionManager::RollbackTransaction(Transaction &transaction) {
-	// D6: ROLLBACK discards in-memory mutations by re-parsing from disk.
-	catalog.ReloadFromDisk();
+	// D6: ROLLBACK discards in-memory mutations by re-parsing from disk. The
+	// transaction holds a weak ref to the ClientContext, which lets the index
+	// cache's staleness check run (it is skipped for context-free loads).
+	auto ctx = transaction.context.lock();
+	catalog.ReloadFromDisk(ctx.get());
 	lock_guard<mutex> l(lock);
 	transactions.erase(transaction);
 }

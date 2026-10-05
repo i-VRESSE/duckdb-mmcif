@@ -136,6 +136,13 @@ COMMIT;   -- writes the mutated tables back to the attached file
 >[!NOTE]
 >The `COMMIT` will overwrite the file you `ATTACH`-ed. Make a copy if you do not want to overwrite the original.
 
+`#` comment lines are kept: the parser records every comment together with what it
+sits in front of (the block header, a category, a single item, a loop row, or the
+end of the file) and the write-back emits it there again, so editing a commented
+`.cif` does not strip its comments. Comments anchored to a deleted row trail the
+loop instead of disappearing; comments of a category that ends up with no rows are
+written away with it.
+
 ## Examples
 
 Ready-to-run example scripts live in [`docs/examples/`](docs/examples/):

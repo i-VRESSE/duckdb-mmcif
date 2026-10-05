@@ -456,6 +456,114 @@ G1
 G2
 
 # ---------------------------------------------------------------------------
+# Comment retention: the write-back must put the '#' lines it read back where
+# they belong instead of dropping them. A comment inside loop data no longer
+# truncates the loop either, so the rows after it survive a write-back too.
+# ---------------------------------------------------------------------------
+
+statement ok
+USE memory;
+
+statement ok
+COPY (SELECT t FROM (VALUES ('# file comment'), ('# second preamble line'), ('data_test'), ('# before the loop'), ('loop_'), ('_atom_site.label_atom_id'), ('_atom_site.Cartn_x'), ('C1'), ('1.5'), ('# between rows'), ('N1'), ('2.5'), ('# trailing comment')) AS v(t)) TO '__TEST_DIR__/mmcif_comments.cif' (FORMAT CSV, HEADER 0, QUOTE '');
+
+# The fixture's comment lines, in file order
+query I
+SELECT line FROM (SELECT unnest(string_split(content, E'\n')) AS line FROM read_text('__TEST_DIR__/mmcif_comments.cif')) WHERE line LIKE '#%';
+----
+# file comment
+# second preamble line
+# before the loop
+# between rows
+# trailing comment
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_comments.cif' AS cmdb (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok
+USE cmdb;
+
+# The row below the in-loop comment is data, not a truncation
+query TT
+SELECT label_atom_id, Cartn_x FROM atom_site ORDER BY label_atom_id;
+----
+C1	1.5
+N1	2.5
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO atom_site (label_atom_id, Cartn_x) VALUES ('O1', 3.5);
+
+statement ok
+COMMIT;
+
+# Every comment is still on disk, in the original order
+query I
+SELECT line FROM (SELECT unnest(string_split(content, E'\n')) AS line FROM read_text('__TEST_DIR__/mmcif_comments.cif')) WHERE line LIKE '#%';
+----
+# file comment
+# second preamble line
+# before the loop
+# between rows
+# trailing comment
+
+# ... and each one still sits in front of what it annotated
+query I
+SELECT (starts_with(content, E'# file comment\n# second preamble line\ndata_test\n') AND contains(content, E'# before the loop\nloop_') AND contains(content, E'# between rows\nN1') AND ends_with(content, E'# trailing comment\n'))::INT
+FROM read_text('__TEST_DIR__/mmcif_comments.cif');
+----
+1
+
+# The write-back is still readable, with the inserted row appended
+statement ok
+USE memory;
+
+statement ok
+DETACH cmdb;
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_comments.cif' AS rcdb (TYPE mmcif);
+
+query TT
+SELECT label_atom_id, Cartn_x FROM rcdb.atom_site ORDER BY label_atom_id;
+----
+C1	1.5
+N1	2.5
+O1	3.5
+
+# ROLLBACK re-materializes from disk, comments included
+statement ok
+USE rcdb;
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_comments.cif' AS wdb2 (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok
+USE wdb2;
+
+statement ok
+BEGIN;
+
+statement ok
+DELETE FROM atom_site WHERE label_atom_id <> 'C1';
+
+statement ok
+ROLLBACK;
+
+statement ok
+USE memory;
+
+statement ok
+DETACH wdb2;
+
+query I
+SELECT count(*) FROM (SELECT unnest(string_split(content, E'\n')) AS line FROM read_text('__TEST_DIR__/mmcif_comments.cif')) WHERE line LIKE '#%';
+----
+5
+
+# ---------------------------------------------------------------------------
 # Remote (http/https/s3/...) mmcif files are always read-only: attaching one
 # with READ_WRITE TRUE is rejected. (A URL scheme that DuckDB core recognizes
 # would first demand httpfs, so a non-core scheme is used here to exercise the

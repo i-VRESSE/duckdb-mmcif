@@ -29,6 +29,8 @@
 #include <string>
 #include <vector>
 
+#include "mmcif_comments.hpp"
+
 namespace duckdb {
 
 // ---------------------------------------------------------------------------
@@ -36,6 +38,10 @@ namespace duckdb {
 // the decompressed buffer (row-major loop data). Handles plain tokens, single
 // and double quotes (with '' / "" escaping), triple quotes, and ;...; multi-line
 // values. '.' and '?' are NULL. Returns (offset, len) into the buffer.
+//
+// A '#' at a token boundary starts a comment that runs to the end of the line;
+// comment lines are skipped so loop data containing a comment still reads its
+// values (a comment is not a value).
 // ---------------------------------------------------------------------------
 
 class MmcifValueCursor {
@@ -128,8 +134,19 @@ public:
 
 private:
 	void SkipWs() {
-		while (pos < end && isspace(static_cast<unsigned char>(base[pos]))) {
-			pos++;
+		while (pos < end) {
+			if (isspace(static_cast<unsigned char>(base[pos]))) {
+				pos++;
+			} else if (base[pos] == '#') {
+				// Comment: skip to the end of the line and keep looking for a
+				// value. Only at a token boundary, so '#' inside a quoted or
+				// text-quoted value is never treated as a comment.
+				while (pos < end && base[pos] != '\n') {
+					pos++;
+				}
+			} else {
+				break;
+			}
 		}
 	}
 	const char *base;
@@ -175,6 +192,10 @@ public:
 	// Load (or fetch from the process-level cache) the index for a file.
 	static shared_ptr<MmcifIndex> Load(const string &path, optional_ptr<ClientContext> context);
 
+	// Drop the process-level cache entry for a path after the file on disk
+	// changes (e.g. after a write-mode COMMIT persists). The next Load re-reads.
+	static void InvalidateCache(const string &path);
+
 	// The seam between the read index and the write model: materialize the
 	// first data block as a mutable MmcifWriteStore (write mode).
 	shared_ptr<MmcifWriteStore> Materialize();
@@ -200,9 +221,25 @@ public:
 		return content_size;
 	}
 
+	// The parser keeps only the first data block; these flags record content
+	// the write-back writer cannot preserve (extra data_ blocks, save frames).
+	bool HasMultipleBlocks() const {
+		return has_multiple_blocks;
+	}
+	bool HasSaveFrames() const {
+		return has_save_frames;
+	}
+
+	// The comments table: every '#' line of the file, in file order, each with
+	// the anchor the writer needs to put it back where it belongs.
+	const std::vector<MmcifComment> &GetComments() const {
+		return comments;
+	}
+
 private:
-	MmcifIndex(string raw_p, string text_p)
-	    : raw(std::move(raw_p)), text(std::move(text_p)), content_data(text.data()), content_size(text.size()) {
+	MmcifIndex(string raw_p, string text_p, idx_t original_text_size_p)
+	    : raw(std::move(raw_p)), text(std::move(text_p)), content_data(text.data()), content_size(text.size()),
+	      original_text_size(original_text_size_p) {
 	}
 	void Build();
 
@@ -211,9 +248,17 @@ private:
 	const char *content_data;
 	idx_t content_size;
 
+	// Size of the original file text before Load appends the synthetic
+	// "data_zzz_prototype" flush block; extra data_ lines at/after this offset
+	// are parser artifacts, not file content.
+	idx_t original_text_size;
+
 	string data_block_name;
 	vector<unique_ptr<MmcifCategory>> categories;
+	std::vector<MmcifComment> comments;
 	mutex row_count_lock;
+	bool has_multiple_blocks = false;
+	bool has_save_frames = false;
 };
 
 } // namespace duckdb

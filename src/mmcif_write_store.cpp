@@ -98,6 +98,12 @@ shared_ptr<MmcifWriteStore> MmcifIndex::Materialize() {
 		}
 		store->categories.push_back(std::move(wc));
 	}
+	store->comments = comments;
+	if (has_multiple_blocks || has_save_frames) {
+		// The regenerating writer can only re-emit the first data block's
+		// categories; refuse write-back for files with unrepresentable content.
+		store->MarkUnrepresentableContent();
+	}
 	return store;
 }
 
@@ -128,6 +134,7 @@ const std::vector<string> &MmcifWriteStore::GetRow(MmcifWriteCategory &cat, idx_
 
 void MmcifWriteStore::AddRow(MmcifWriteCategory &cat, const std::vector<string> &row) {
 	cat.rows.push_back(row);
+	dirty = true;
 }
 
 void MmcifWriteStore::DeleteRows(MmcifWriteCategory &cat, const std::vector<unsigned int> &rows) {
@@ -136,6 +143,7 @@ void MmcifWriteStore::DeleteRows(MmcifWriteCategory &cat, const std::vector<unsi
 	for (idx_t i = rows.size(); i > 0; i--) {
 		cat.rows.erase(cat.rows.begin() + rows[i - 1]);
 	}
+	dirty = true;
 }
 
 void MmcifWriteStore::UpdateCell(MmcifWriteCategory &cat, idx_t row, const string &col, const string &value) {
@@ -147,6 +155,7 @@ void MmcifWriteStore::UpdateCell(MmcifWriteCategory &cat, idx_t row, const strin
 		}
 	}
 	cat.rows[row][col_index] = value;
+	dirty = true;
 }
 
 } // namespace duckdb

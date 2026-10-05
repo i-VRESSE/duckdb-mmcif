@@ -134,7 +134,8 @@ public:
 	MmcifWriteStore *GetWriteStore();
 	shared_ptr<MmcifIndex> GetIndex(optional_ptr<ClientContext> context);
 	// ROLLBACK: discard in-memory mutations by re-materializing from disk.
-	void ReloadFromDisk();
+	// The context (when available) lets the index cache's staleness check run.
+	void ReloadFromDisk(optional_ptr<ClientContext> context);
 	// COMMIT / detach / checkpoint: write the in-memory store back to disk
 	// (gzip vs plain vs remote policy lives in MmcifFile::Persist).
 	void Persist(ClientContext &context);

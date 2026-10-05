@@ -75,26 +75,49 @@ void MmcifFile::Persist(const MmcifWriteStore &store, const string &path, Client
 	if (MmcifFile::IsRemotePath(path)) {
 		throw IOException("mmcif: cannot write back to remote path %s - remote files are read-only", path);
 	}
-	if (StringUtil::EndsWith(StringUtil::Lower(path), ".gz")) {
-		// MmcifWriteCif always emits plain text; run it through DuckDB's
-		// gzip compression stream so the .cif.gz round-trips correctly.
-		std::ostringstream ss;
-		MmcifWriteCif(ss, store);
-		auto content = ss.str();
-		auto &fs = FileSystem::GetFileSystem(context);
-		FileOpenFlags flags = FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW;
-		flags.SetCompression(FileCompressionType::GZIP);
-		auto handle = fs.OpenFile(path, flags);
-		if (!content.empty()) {
-			fs.Write(*handle, data_ptr_cast(&content[0]), content.size());
+	auto &fs = FileSystem::GetFileSystem(context);
+	// Write to a temp file in the same directory, then rename over the target:
+	// each file's write-back is atomic (a crash or failed write leaves the old
+	// file intact, never a truncated .cif). Errors are surfaced (the old
+	// std::ofstream path silently dropped writes when open/IO failed).
+	const string tmp_path = path + ".tmp";
+	try {
+		if (StringUtil::EndsWith(StringUtil::Lower(path), ".gz")) {
+			// MmcifWriteCif always emits plain text; run it through DuckDB's
+			// gzip compression stream so the .cif.gz round-trips correctly.
+			std::ostringstream ss;
+			MmcifWriteCif(ss, store);
+			auto content = ss.str();
+			FileOpenFlags flags = FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW;
+			flags.SetCompression(FileCompressionType::GZIP);
+			auto handle = fs.OpenFile(tmp_path, flags);
+			if (!content.empty()) {
+				fs.Write(*handle, data_ptr_cast(&content[0]), content.size());
+			}
+			// Closing the handle flushes the gzip footer (deflate stream end).
+			handle->Close();
+		} else {
+			std::ofstream ofs(tmp_path.c_str(), std::ios::out | std::ios::trunc);
+			if (!ofs) {
+				throw IOException("mmcif: cannot open '%s' for writing", tmp_path.c_str());
+			}
+			MmcifWriteCif(ofs, store);
+			ofs.flush();
+			if (!ofs) {
+				throw IOException("mmcif: failed writing '%s'", tmp_path.c_str());
+			}
+			ofs.close();
 		}
-		// Closing the handle flushes the gzip footer (deflate stream end).
-		handle->Close();
-	} else {
-		std::ofstream ofs(path.c_str(), std::ios::out | std::ios::trunc);
-		MmcifWriteCif(ofs, store);
-		ofs.close();
+		// Atomic move over the target (rename). fs.MoveFile is the ACID rename
+		// the storage manager relies on.
+		fs.MoveFile(tmp_path, path);
+	} catch (...) {
+		fs.TryRemoveFile(tmp_path);
+		throw;
 	}
+	// The file on disk changed: drop the process-level index cache entry so a
+	// re-attach / reload re-reads instead of materializing a stale store.
+	MmcifIndex::InvalidateCache(path);
 }
 
 } // namespace duckdb
