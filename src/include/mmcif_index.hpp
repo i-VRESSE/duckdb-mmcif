@@ -187,7 +187,7 @@ struct MmcifCategory {
 // and the store is MmcifIndex::Materialize() below.
 class MmcifWriteStore;
 
-class MmcifIndex {
+class MmcifIndex : public std::enable_shared_from_this<MmcifIndex> {
 public:
 	// Load (or fetch from the process-level cache) the index for a file.
 	static shared_ptr<MmcifIndex> Load(const string &path, optional_ptr<ClientContext> context);
@@ -219,6 +219,10 @@ public:
 	}
 	idx_t GetDataSize() const {
 		return content_size;
+	}
+	// Size of the file text without the synthetic flush block Load appends.
+	idx_t GetOriginalTextSize() const {
+		return original_text_size;
 	}
 
 	// The parser keeps only the first data block; these flags record content

@@ -678,3 +678,162 @@ ZKHQWZAMYRWXGA-KQYNXXCUSA-N
 
 statement ok
 USE memory;
+
+# ---------------------------------------------------------------------------
+# Surgical write-back: a COMMIT changes only the bytes of the data it touched.
+# Column alignment, comments, blank lines, the quoting of values that were not
+# edited, and content the data model does not carry all survive byte for byte.
+# Each case snapshots the file first, then shows that undoing the one edited
+# value in the written file reproduces the original bytes exactly.
+# ---------------------------------------------------------------------------
+
+statement ok
+USE memory;
+
+statement ok
+COPY (SELECT t FROM (VALUES ('# top comment'), ('data_surgical'), ('#'), ('loop_'), ('_atom.id'), ('_atom.name'), ('1     alpha'), ('2     beta'), ('# trailing comment')) AS v(t)) TO '__TEST_DIR__/mmcif_surgical_upd.cif' (FORMAT CSV, HEADER 0, QUOTE '');
+
+statement ok
+CREATE TABLE upd_orig AS SELECT content AS txt FROM read_text('__TEST_DIR__/mmcif_surgical_upd.cif');
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_surgical_upd.cif' AS ud (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok
+USE ud;
+
+statement ok
+UPDATE atom SET name='ALPHA' WHERE id=1;
+
+statement ok
+USE memory;
+
+statement ok
+DETACH ud;
+
+# Undoing the edited value in the written file gives the original file back:
+# nothing else in it moved, repadded or requoted.
+query I
+SELECT (replace(content, 'ALPHA', 'alpha') = (SELECT txt FROM upd_orig))::INT
+FROM read_text('__TEST_DIR__/mmcif_surgical_upd.cif');
+----
+1
+
+# The untouched line keeps the file's own column alignment
+query I
+SELECT contains(content, E'2     beta\n')::INT FROM read_text('__TEST_DIR__/mmcif_surgical_upd.cif');
+----
+1
+
+statement ok
+USE memory;
+
+statement ok
+COPY (SELECT t FROM (VALUES ('# top comment'), ('data_surgical'), ('#'), ('loop_'), ('_atom.id'), ('_atom.name'), ('1     alpha'), ('2     beta'), ('# trailing comment')) AS v(t)) TO '__TEST_DIR__/mmcif_surgical_del.cif' (FORMAT CSV, HEADER 0, QUOTE '');
+
+statement ok
+CREATE TABLE del_orig AS SELECT content AS txt FROM read_text('__TEST_DIR__/mmcif_surgical_del.cif');
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_surgical_del.cif' AS dd (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok
+USE dd;
+
+statement ok
+DELETE FROM atom WHERE id=1;
+
+statement ok
+USE memory;
+
+statement ok
+DETACH dd;
+
+# The deleted row's whole line is gone and nothing else changed
+query I
+SELECT (content = replace((SELECT txt FROM del_orig), E'1     alpha\n', ''))::INT
+FROM read_text('__TEST_DIR__/mmcif_surgical_del.cif');
+----
+1
+
+statement ok
+USE memory;
+
+statement ok
+COPY (SELECT t FROM (VALUES ('# top comment'), ('data_surgical'), ('#'), ('loop_'), ('_atom.id'), ('_atom.name'), ('1     alpha'), ('2     beta'), ('# trailing comment')) AS v(t)) TO '__TEST_DIR__/mmcif_surgical_ins.cif' (FORMAT CSV, HEADER 0, QUOTE '');
+
+statement ok
+CREATE TABLE ins_orig AS SELECT content AS txt FROM read_text('__TEST_DIR__/mmcif_surgical_ins.cif');
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_surgical_ins.cif' AS idd (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok
+USE idd;
+
+statement ok
+INSERT INTO atom (id, name) VALUES (3, 'gamma');
+
+statement ok
+USE memory;
+
+statement ok
+DETACH idd;
+
+# Removing the one generated line gives the original file back
+query I
+SELECT (replace(content, E'3 gamma\n', '') = (SELECT txt FROM ins_orig))::INT
+FROM read_text('__TEST_DIR__/mmcif_surgical_ins.cif');
+----
+1
+
+# The new row lands at the end of the loop, above the trailing comment
+query I
+SELECT contains(content, E'2     beta\n3 gamma\n# trailing comment\n')::INT
+FROM read_text('__TEST_DIR__/mmcif_surgical_ins.cif');
+----
+1
+
+statement ok
+USE memory;
+
+statement ok
+COPY (SELECT t FROM (VALUES ('# preamble'), ('data_FIRST'), ('#'), ('loop_'), ('_a.id'), ('_a.v'), ('1 one'), ('# between blocks'), ('data_SECOND'), ('_a.id 9'), ('_a.v ''second block value''')) AS v(t)) TO '__TEST_DIR__/mmcif_surgical_multi.cif' (FORMAT CSV, HEADER 0, QUOTE '');
+
+statement ok
+CREATE TABLE multi_orig AS SELECT content AS txt FROM read_text('__TEST_DIR__/mmcif_surgical_multi.cif');
+
+# A file with more than one data block is writable now: the patch leaves the
+# blocks it does not model exactly as they were instead of dropping them.
+statement ok
+ATTACH '__TEST_DIR__/mmcif_surgical_multi.cif' AS md (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok
+USE md;
+
+# Only the first data block is modelled
+query I
+SELECT count(*) FROM a;
+----
+1
+
+statement ok
+UPDATE a SET v='ONE' WHERE id=1;
+
+statement ok
+USE memory;
+
+statement ok
+DETACH md;
+
+query I
+SELECT (replace(content, 'ONE', 'one') = (SELECT txt FROM multi_orig))::INT
+FROM read_text('__TEST_DIR__/mmcif_surgical_multi.cif');
+----
+1
+
+query I
+SELECT (contains(content, E'data_SECOND\n') AND contains(content, E'second block value'))::INT
+FROM read_text('__TEST_DIR__/mmcif_surgical_multi.cif');
+----
+1

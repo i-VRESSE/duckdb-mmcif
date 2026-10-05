@@ -481,7 +481,10 @@ MmcifCatalog::MmcifCatalog(AttachedDatabase &db_p, string path_p, bool write_mod
     : Catalog(db_p), path(std::move(path_p)), write_mode(write_mode_p) {
 	if (write_mode) {
 		write_store = MmcifFile::LoadWriteStore(path, nullptr);
-		if (write_store->HasUnrepresentableContent()) {
+		// The surgical write-back keeps content the data model does not carry
+		// (extra data blocks, save frames) byte-for-byte, so only the
+		// regenerating fallback has to refuse such files.
+		if (write_store->HasUnrepresentableContent() && !write_store->HasSource()) {
 			throw InvalidInputException(
 			    "mmcif: '%s' cannot be attached with READ_WRITE - the file contains multiple data blocks or save "
 			    "frames that write mode cannot write back without losing them",
@@ -524,7 +527,7 @@ void MmcifCatalog::Persist(ClientContext &context) {
 		// Read-only / no-op transactions never rewrite the file.
 		return;
 	}
-	if (write_store->HasUnrepresentableContent()) {
+	if (write_store->HasUnrepresentableContent() && !write_store->HasSource()) {
 		throw IOException("mmcif: cannot commit write-back of '%s' - the file contains multiple data blocks or save "
 		                  "frames that write mode cannot preserve",
 		                  path.c_str());

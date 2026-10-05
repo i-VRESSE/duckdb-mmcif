@@ -16,6 +16,7 @@
 #include <string>
 
 #include "mmcif_index.hpp"
+#include "mmcif_patch.hpp"
 #include "mmcif_writer.hpp"
 
 namespace duckdb {
@@ -68,6 +69,18 @@ shared_ptr<MmcifWriteStore> MmcifFile::LoadWriteStore(const string &file_name, o
 	return index->Materialize();
 }
 
+// Render the store for write-back. The surgical patch keeps every byte of the
+// source file the transaction did not modify; the regenerating writer is only
+// used for a store that has no source (built in memory).
+static string MmcifRenderStore(const MmcifWriteStore &store) {
+	if (store.HasSource()) {
+		return MmcifPatch::Apply(store);
+	}
+	std::ostringstream ss;
+	MmcifWriteCif(ss, store);
+	return ss.str();
+}
+
 // COMMIT / detach / checkpoint: write the in-memory store back to disk.
 // Paths ending in .gz are written back gzip-compressed (the read path
 // auto-decompresses them, so writing plain text would break the round-trip).
@@ -76,6 +89,8 @@ void MmcifFile::Persist(const MmcifWriteStore &store, const string &path, Client
 		throw IOException("mmcif: cannot write back to remote path %s - remote files are read-only", path);
 	}
 	auto &fs = FileSystem::GetFileSystem(context);
+	// Render first: a failure here happens before anything is touched on disk.
+	string content = MmcifRenderStore(store);
 	// Write to a temp file in the same directory, then rename over the target:
 	// each file's write-back is atomic (a crash or failed write leaves the old
 	// file intact, never a truncated .cif). Errors are surfaced (the old
@@ -83,11 +98,8 @@ void MmcifFile::Persist(const MmcifWriteStore &store, const string &path, Client
 	const string tmp_path = path + ".tmp";
 	try {
 		if (StringUtil::EndsWith(StringUtil::Lower(path), ".gz")) {
-			// MmcifWriteCif always emits plain text; run it through DuckDB's
-			// gzip compression stream so the .cif.gz round-trips correctly.
-			std::ostringstream ss;
-			MmcifWriteCif(ss, store);
-			auto content = ss.str();
+			// The store renders plain text; run it through DuckDB's gzip
+			// compression stream so the .cif.gz round-trips correctly.
 			FileOpenFlags flags = FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW;
 			flags.SetCompression(FileCompressionType::GZIP);
 			auto handle = fs.OpenFile(tmp_path, flags);
@@ -103,7 +115,7 @@ void MmcifFile::Persist(const MmcifWriteStore &store, const string &path, Client
 			if (!ofs) {
 				throw IOException("mmcif: cannot open '%s' for writing", tmp_path.c_str());
 			}
-			MmcifWriteCif(ofs, store);
+			ofs.write(content.data(), static_cast<std::streamsize>(content.size()));
 			ofs.flush();
 			if (!ofs) {
 				throw IOException("mmcif: failed writing '%s'", tmp_path.c_str());

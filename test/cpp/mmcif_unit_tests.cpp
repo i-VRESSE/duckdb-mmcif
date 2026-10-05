@@ -13,6 +13,7 @@
 
 #include "mmcif_file.hpp"
 #include "mmcif_index.hpp"
+#include "mmcif_patch.hpp"
 #include "mmcif_write_store.hpp"
 #include "mmcif_writer.hpp"
 
@@ -680,4 +681,197 @@ TEST_CASE("MmcifFile::Read returns empty content for a missing local file", "[mm
 	// string for a path that does not exist (no exception on this path).
 	auto content = MmcifFile::Read("/nonexistent/path/mmcif_does_not_exist.cif", nullptr);
 	REQUIRE(content.empty());
+}
+
+// ---------------------------------------------------------------------------
+// MmcifPatch: surgical write-back. The point of these tests is that the patched
+// text equals the original everywhere except where the transaction changed data,
+// so they assert whole-file equality rather than substrings.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const char *PATCH_SRC = "# top comment\n"
+                        "data_test\n"
+                        "#\n"
+                        "loop_\n"
+                        "_atom.id\n"
+                        "_atom.name\n"
+                        "1 alpha\n"
+                        "2 beta\n"
+                        "# trailing comment\n";
+
+shared_ptr<MmcifWriteStore> PatchFixture(const TempCif &cif) {
+	auto index = MmcifIndex::Load(cif.Str(), nullptr);
+	auto store = index->Materialize();
+	REQUIRE(store->HasSource());
+	return store;
+}
+
+} // namespace
+
+TEST_CASE("MmcifPatch changes only the bytes of the updated value", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_update.cif", PATCH_SRC);
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("atom");
+	REQUIRE(cat != nullptr);
+
+	store->UpdateCell(*cat, 0, "name", "ALPHA");
+	std::string expected = "# top comment\n"
+	                       "data_test\n"
+	                       "#\n"
+	                       "loop_\n"
+	                       "_atom.id\n"
+	                       "_atom.name\n"
+	                       "1 ALPHA\n"
+	                       "2 beta\n"
+	                       "# trailing comment\n";
+	REQUIRE(MmcifPatch::Apply(*store) == expected);
+}
+
+TEST_CASE("MmcifPatch cuts a deleted row out cleanly", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_delete.cif", PATCH_SRC);
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("atom");
+	REQUIRE(cat != nullptr);
+
+	store->DeleteRows(*cat, {0});
+	std::string expected = "# top comment\n"
+	                       "data_test\n"
+	                       "#\n"
+	                       "loop_\n"
+	                       "_atom.id\n"
+	                       "_atom.name\n"
+	                       "2 beta\n"
+	                       "# trailing comment\n";
+	REQUIRE(MmcifPatch::Apply(*store) == expected);
+}
+
+TEST_CASE("MmcifPatch splices an inserted row in after the last original row", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_insert.cif", PATCH_SRC);
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("atom");
+	REQUIRE(cat != nullptr);
+
+	store->AddRow(*cat, {"3", "gamma"});
+	std::string expected = "# top comment\n"
+	                       "data_test\n"
+	                       "#\n"
+	                       "loop_\n"
+	                       "_atom.id\n"
+	                       "_atom.name\n"
+	                       "1 alpha\n"
+	                       "2 beta\n"
+	                       "3 gamma\n"
+	                       "# trailing comment\n";
+	REQUIRE(MmcifPatch::Apply(*store) == expected);
+}
+
+TEST_CASE("MmcifPatch returns the original bytes for a net-zero edit", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_netzero.cif", PATCH_SRC);
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("atom");
+	REQUIRE(cat != nullptr);
+
+	store->AddRow(*cat, {"3", "gamma"});
+	store->DeleteRows(*cat, {2});
+	REQUIRE(MmcifPatch::Apply(*store) == std::string(PATCH_SRC));
+}
+
+TEST_CASE("MmcifPatch opens a text field in column 1", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_textfield.cif", PATCH_SRC);
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("atom");
+	REQUIRE(cat != nullptr);
+
+	// A multi-line value cannot stay on the row's line: the ';...' block has to
+	// start at column 1, so the row breaks first.
+	store->UpdateCell(*cat, 0, "name", "line one\nline two");
+	std::string expected = "# top comment\n"
+	                       "data_test\n"
+	                       "#\n"
+	                       "loop_\n"
+	                       "_atom.id\n"
+	                       "_atom.name\n"
+	                       "1 \n"
+	                       ";line one\n"
+	                       "line two\n"
+	                       ";\n"
+	                       "2 beta\n"
+	                       "# trailing comment\n";
+	REQUIRE(MmcifPatch::Apply(*store) == expected);
+}
+
+TEST_CASE("MmcifPatch keeps extra data blocks and save frames verbatim", "[mmcif][patch]") {
+	const char *multi = "# preamble\n"
+	                    "data_FIRST\n"
+	                    "#\n"
+	                    "loop_\n"
+	                    "_a.id\n"
+	                    "_a.v\n"
+	                    "1 one\n"
+	                    "# between blocks\n"
+	                    "data_SECOND\n"
+	                    "_a.id 9\n"
+	                    "_a.v 'second block value'\n";
+	TempCif cif("mmcif_patch_multiblock.cif", multi);
+	auto store = PatchFixture(cif);
+	// The store knows the file has content it does not model, but the patch
+	// keeps those bytes, so write-back is safe.
+	REQUIRE(store->HasUnrepresentableContent());
+	auto *cat = store->FindCategory("a");
+	REQUIRE(cat != nullptr);
+
+	store->UpdateCell(*cat, 0, "v", "ONE");
+	std::string expected = "# preamble\n"
+	                       "data_FIRST\n"
+	                       "#\n"
+	                       "loop_\n"
+	                       "_a.id\n"
+	                       "_a.v\n"
+	                       "1 ONE\n"
+	                       "# between blocks\n"
+	                       "data_SECOND\n"
+	                       "_a.id 9\n"
+	                       "_a.v 'second block value'\n";
+	REQUIRE(MmcifPatch::Apply(*store) == expected);
+}
+
+TEST_CASE("MmcifPatch refuses a value it cannot represent", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_unrepresentable.cif", PATCH_SRC);
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("atom");
+	REQUIRE(cat != nullptr);
+
+	// A text field cannot contain a line starting with ';'.
+	store->UpdateCell(*cat, 0, "name", "ok\n;not ok");
+	REQUIRE_THROWS_AS(MmcifPatch::Apply(*store), IOException);
+}
+
+TEST_CASE("MmcifPatch keeps a CRLF file's line ending convention", "[mmcif][patch]") {
+	const char *crlf = "# top comment\r\n"
+	                   "data_test\r\n"
+	                   "loop_\r\n"
+	                   "_atom.id\r\n"
+	                   "_atom.name\r\n"
+	                   "1 alpha\r\n"
+	                   "2 beta\r\n";
+	TempCif cif("mmcif_patch_crlf.cif", crlf);
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("atom");
+	REQUIRE(cat != nullptr);
+
+	// A plain update leaves every line ending alone.
+	store->UpdateCell(*cat, 0, "name", "ALPHA");
+	REQUIRE(MmcifPatch::Apply(*store) == std::string("# top comment\r\ndata_test\r\nloop_\r\n_atom.id\r\n_atom.name\r\n"
+	                                                 "1 ALPHA\r\n"
+	                                                 "2 beta\r\n"));
+
+	// A value that needs a text field breaks the line with CRLF, not LF.
+	store->UpdateCell(*cat, 1, "name", "both 'quotes' and \"quotes\"");
+	REQUIRE(MmcifPatch::Apply(*store) == std::string("# top comment\r\ndata_test\r\nloop_\r\n_atom.id\r\n_atom.name\r\n"
+	                                                 "1 ALPHA\r\n"
+	                                                 "2 \r\n"
+	                                                 ";both 'quotes' and \"quotes\"\r\n"
+	                                                 ";\r\n"));
 }

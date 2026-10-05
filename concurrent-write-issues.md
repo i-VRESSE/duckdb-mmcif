@@ -106,11 +106,12 @@ INSERT INTO wb.atom_site (...) VALUES ('Y1', 8.8); COMMIT;
 Implemented fixes:
 
 - **#1 + #7 (rewrite on read-only / DETACH / CHECKPOINT)**: `MmcifWriteStore` now tracks a `dirty` flag, set by `AddRow`/`DeleteRows`/`UpdateCell`. `MmcifCatalog::Persist` skips the write-back unless the store is dirty and clears it after a successful persist, so read-only transactions, no-op commits, DETACH, and CHECKPOINT never rewrite the file.
-- **#2 (destructive rewrite)**: the parser now records `has_multiple_blocks` / `has_save_frames` (`mmcif_index.cpp`), `Materialize()` copies that onto the store, and write-mode attach (`MmcifCatalog` ctor) throws for such files instead of silently dropping whole blocks on commit. Comments are still dropped (cosmetic). The detection ignores the parser's synthetic `data_zzz_prototype` flush block (`original_text_size` bounds the check), so clean single-block files are unaffected.
+- **#2 (destructive rewrite)**: the parser now records `has_multiple_blocks` / `has_save_frames` (`mmcif_index.cpp`), `Materialize()` copies that onto the store, and write-mode attach (`MmcifCatalog` ctor) throws for such files instead of silently dropping whole blocks on commit. Comments are still dropped (cosmetic). The detection ignores the parser's synthetic `data_zzz_prototype` flush block (`original_text_size` bounds the check), so clean single-block files are unaffected. *Relaxed 2026-10-05:* with the surgical patch path (see item 5) these files are preserved rather than dropped, so they are writable again; the refusal now only guards the regenerating fallback.
 - **#3 (silent failures)**: `MmcifFile::Persist` now checks the `ofstream` state and throws `IOException` on open/write failure; the gzip path already surfaced errors via DuckDB's FS. Verified: a read-only *directory* makes COMMIT fail with `cannot open '...tmp' for writing`.
 - **#4 (single-file atomicity)**: `Persist` writes to a `<path>.tmp` in the same directory, then `FileSystem::MoveFile` (rename) over the target, with temp cleanup on failure. A crash or failed write no longer leaves a truncated `.cif`. Side effect: because rename needs only directory-write permission, a read-only *target* file is replaced anyway when its directory is writable (verified: chmod 444 `b.cif.gz` -> COMMIT succeeds, file becomes 644).
 - **Windows CRLF in the write-back** — fixed 2026-10-05: `MmcifFile::Persist` opened the plain-path `std::ofstream` in *text* mode, so on Windows every `\n` was translated to `\r\n` and the rewritten `.cif` carried carriage returns (caught by `test/sql/mmcif.test:503` on the Windows CI job: splitting the file on `E'\n'` left a `\r` on every line). The stream is now opened with `std::ios::binary`, matching the read paths. The gzip path was never affected (it goes through DuckDB's FS).
 - **#5 (stale cache erasing committed data)**: successful `Persist` now calls `MmcifIndex::InvalidateCache(path)` (drops the index + stamp entries), `ReloadFromDisk` passes the transaction's `ClientContext` so the staleness check runs, and the context-free staleness check now stats local files by size instead of always returning "unchanged".
+- **Surgical write-back (fidelity)** — added 2026-10-05: `COMMIT` patches the bytes of the file it read instead of regenerating it from the data model. `Materialize()` records the source byte span of every row and cell, and `MmcifPatch::Apply()` (`src/mmcif_patch.cpp`) splices UPDATE / DELETE / INSERT into those spans and copies everything else through untouched. See item 5 under Remaining work for the model and the before/after measurements.
 
 Remaining limitations (DuckDB core / design):
 
@@ -210,26 +211,54 @@ Needs: copy mode (and ownership where permitted) from the old file before the
 rename, decide whether the target being read-only should be an error, and resolve
 symlinks (`RealPath`) at attach so the link keeps pointing at live data.
 
-### 5. Round-trip fidelity gaps beyond comments
+### 5. Round-trip fidelity — solved by surgical write-back (2026-10-05)
 
-- **Multi-block / save-frame files are refused, not supported.** The "keep them"
-  option from fix #2 is still open; today such files cannot be opened READ_WRITE at
-  all.
-- **CRLF input comes back mixed.** A `\r\n` file is written back with `\r` only on
-  the retained comment lines and `\n` on everything the writer generates.
-- **Read/write value asymmetry.** The read path returns raw tokens
-  (`"abc def"`, `_`) while the write path decodes and re-quotes, so after a
-  write-back the same cells read as `'abc def'` and `'_'` — the strings a user
-  sees change under them:
+The regenerating writer re-emitted the whole file from the data model, so every
+byte it produced was new: alignment, quoting and line breaks all moved, and
+content the model does not carry was dropped. Write-back now patches the source
+file instead. `MmcifIndex::Materialize()` records where every row and cell came
+from (`MmcifRowSpan` / `MmcifCellSpan` in `mmcif_write_store.hpp`) and
+`MmcifPatch::Apply()` (`src/mmcif_patch.cpp`) splices the mutations into the
+original bytes:
 
-  | cell in original file | read before write-back | read after write-back |
-  | --- | --- | --- |
-  | `"abc def"` | `"abc def"` | `'abc def'` |
-  | `_` | `_` | `'_'` |
-  | `;\nmulti line\nvalue\n;` | unchanged | unchanged |
+- **UPDATE** replaces exactly the bytes of the old value.
+- **DELETE** cuts out the deleted row's whole lines.
+- **INSERT** generates the new row and splices it in after the category's last
+  original row.
+- Everything else is copied through verbatim.
 
-  Needs: either decode on the read path too (so both sides agree on the logical
-  value), or emit the store's stored form verbatim.
+Measured on `3PLZ.cif` (7,696 lines, 74 comment lines), one-cell update:
+
+| before | after |
+| --- | --- |
+| 7,696 → 12,028 lines, 4,403 removed / 8,735 added | 7,696 → 7,696 lines, **1 line changed** |
+
+and only the value bytes inside that line (`C` → `Se`). A transaction that
+inserts a row and deletes it again leaves the file byte-identical to the
+original, and `ROLLBACK` never touches it.
+
+This closes the specific gaps listed here earlier:
+
+- **Multi-block / save-frame files** are preserved byte for byte, so they can be
+  attached READ_WRITE now instead of being refused. Only the first `data_` block
+  is modelled and editable; the rest is untouched.
+- **CRLF input stays CRLF.** A line the patch has to break uses the line ending
+  of the line it sits in, so a `\r\n` file does not come back with mixed
+  endings.
+- **Read/write value asymmetry is gone for unedited cells.** `"abc def"` and `_`
+  keep the bytes they had, so they read the same after a write-back as before.
+  Only values the transaction actually set are re-formatted.
+
+Still open, and inherent to generating content that did not exist before:
+
+- Generated rows are minimally formatted (values separated by a single space,
+  no column alignment with the surrounding rows).
+- A value that cannot be represented — a text field containing a line that
+  starts with `;` — throws at COMMIT instead of writing something unparseable.
+- A category that mixes a `loop_` with separate single-item lines of the same
+  category cannot have those single items patched (no source position for them
+  in the materialised row); the write-back reports it rather than dropping the
+  value.
 
 ### 6. Cross-file commit atomicity (problem 4) is still documentation-only
 
@@ -241,10 +270,14 @@ multi-database transactions become possible.
 
 ### 7. Test coverage gaps
 
-`test/sql/mmcif.test` and `test/cpp/mmcif_unit_tests.cpp` cover the writer,
-comment anchors, rollback and the gzip round-trip well. Nothing yet covers:
+Covered now (`[mmcif][patch]` in `test/cpp/mmcif_unit_tests.cpp`, plus a
+surgical-write-back section in `test/sql/mmcif.test`): whole-file equality after
+an UPDATE / DELETE / INSERT / net-zero transaction, text fields opening in
+column 1, the CRLF convention, multi-block and save-frame files surviving a
+write-back, and the unrepresentable-value error.
+
+Nothing yet covers:
 
 - two-process / two-connection writes to the same file (items 1 and 3),
 - the same-path double `READ_WRITE` attach (item 2),
-- permission and symlink preservation across a write-back (item 4),
-- CRLF input round-trip, and the quoting asymmetry (item 5).
+- permission and symlink preservation across a write-back (item 4).
