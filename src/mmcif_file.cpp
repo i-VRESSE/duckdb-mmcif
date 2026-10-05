@@ -97,7 +97,9 @@ void MmcifFile::Persist(const MmcifWriteStore &store, const string &path, Client
 			// Closing the handle flushes the gzip footer (deflate stream end).
 			handle->Close();
 		} else {
-			std::ofstream ofs(tmp_path.c_str(), std::ios::out | std::ios::trunc);
+			// binary: without it Windows text mode translates every '\n' to
+			// '\r\n', so the write-back would add carriage returns to the .cif.
+			std::ofstream ofs(tmp_path.c_str(), std::ios::out | std::ios::trunc | std::ios::binary);
 			if (!ofs) {
 				throw IOException("mmcif: cannot open '%s' for writing", tmp_path.c_str());
 			}
