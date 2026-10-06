@@ -16,3 +16,7 @@ AGENTS.md
 skills-lock.json
 
 mmcif_pdbx_v50.dic
+
+# Ad-hoc mmCIF samples in repo root
+/*.cif
+/*.cif.gz
