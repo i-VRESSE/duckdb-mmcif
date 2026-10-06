@@ -128,15 +128,14 @@ static void MmcifScanIndex(ClientContext &context, TableFunctionInput &data, Dat
 	if (cat.is_loop) {
 		idx_t loop_ncols = cat.loop_col_map.size();
 		while (count < STANDARD_VECTOR_SIZE && !gstate.done) {
-			bool ok = true;
-			for (idx_t li = 0; li < loop_ncols; li++) {
-				idx_t full_col = cat.loop_col_map[li];
-				idx_t out_pos = gstate.full_to_out[full_col];
+			idx_t li = 0;
+			for (; li < loop_ncols; li++) {
+				idx_t out_pos = gstate.full_to_out[cat.loop_col_map[li]];
 				const char *out;
 				idx_t len;
 				bool is_null;
 				if (!gstate.cursor->Next(&out, &len, &is_null)) {
-					ok = false;
+					gstate.done = true;
 					break;
 				}
 				if (out_pos != DConstants::INVALID_INDEX) {
@@ -147,9 +146,15 @@ static void MmcifScanIndex(ClientContext &context, TableFunctionInput &data, Dat
 					}
 				}
 			}
-			if (!ok) {
-				gstate.done = true;
-				break;
+			if (li == 0) {
+				break; // cursor exhausted at a row boundary
+			}
+			// A partial trailing row: its missing values are NULL.
+			for (; li < loop_ncols; li++) {
+				idx_t out_pos = gstate.full_to_out[cat.loop_col_map[li]];
+				if (out_pos != DConstants::INVALID_INDEX) {
+					FlatVector::SetNull(*tmp[out_pos], count, true);
+				}
 			}
 			for (idx_t c = 0; c < out_cols; c++) {
 				auto col_id = gstate.column_ids[c];

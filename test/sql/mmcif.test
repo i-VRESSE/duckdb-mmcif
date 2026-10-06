@@ -200,6 +200,27 @@ SELECT * FROM nonexistent_table;
 ----
 Catalog Error: Table with name nonexistent_table does not exist!
 
+# A partial trailing loop row is read, with its missing values as NULL
+statement ok
+COPY (SELECT 'data_p' || chr(10) || 'loop_' || chr(10) || '_p.a' || chr(10) || '_p.b' || chr(10) || '1 2' || chr(10) || '3') TO '__TEST_DIR__/mmcif_partial.cif' (FORMAT CSV, HEADER 0, QUOTE '');
+
+query II
+SELECT * FROM mmcif_scan('__TEST_DIR__/mmcif_partial.cif', 'p');
+----
+1	2
+3	NULL
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_partial.cif' AS partial (TYPE mmcif);
+
+query I
+SELECT count(*) FROM partial.p;
+----
+2
+
+statement ok
+DETACH partial
+
 # ---------------------------------------------------------------------------
 # Write mode: ATTACH ... (READ_WRITE TRUE) enables row-level
 # INSERT/UPDATE/DELETE, with write-back on COMMIT and ROLLBACK discarding.
