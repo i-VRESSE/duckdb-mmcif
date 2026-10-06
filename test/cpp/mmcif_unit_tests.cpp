@@ -894,6 +894,33 @@ TEST_CASE("MmcifPatch opens a text field in column 1", "[mmcif][patch]") {
 	REQUIRE(MmcifPatch::Apply(*store) == expected);
 }
 
+TEST_CASE("MmcifPatch ends the line after a text field's closing ';'", "[mmcif][patch]") {
+	const std::string head = "data_t\nloop_\n_c.x\n_c.y\n_c.z\n";
+	TempCif cif("mmcif_patch_textfield_midrow.cif", head + "1 a 2\n");
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("c");
+	REQUIRE(cat != nullptr);
+
+	// Updated mid-row: the rest of the source row moves to the next line.
+	store->UpdateCell(*cat, 0, "y", "both ' and \"");
+	// Inserted row: values after the text field start a new line too.
+	store->AddRow(*cat, {"3", "x\ny", "4"});
+	REQUIRE(MmcifPatch::Apply(*store) == head + "1 \n;both ' and \"\n;\n 2\n3\n;x\ny\n;\n4\n");
+}
+
+TEST_CASE("MmcifPatch quotes values with embedded quotes", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_embedded_quotes.cif", PATCH_SRC);
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("atom");
+	REQUIRE(cat != nullptr);
+
+	store->UpdateCell(*cat, 0, "name", "H5'1");
+	store->UpdateCell(*cat, 1, "name", "a\"b");
+	auto out = MmcifPatch::Apply(*store);
+	REQUIRE(out.find("1 \"H5'1\"\n") != std::string::npos);
+	REQUIRE(out.find("2 'a\"b'\n") != std::string::npos);
+}
+
 TEST_CASE("MmcifPatch keeps extra data blocks and save frames verbatim", "[mmcif][patch]") {
 	const char *multi = "# preamble\n"
 	                    "data_FIRST\n"

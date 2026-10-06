@@ -725,6 +725,22 @@ SELECT contains(content, E'2     beta\n')::INT FROM read_text('__TEST_DIR__/mmci
 ----
 1
 
+# Values with embedded quotes are written quoted (wwPDB convention), so naive
+# tokenizers such as pdbe-mmcif-validator do not misread them as quote openers
+statement ok
+ATTACH '__TEST_DIR__/mmcif_surgical_upd.cif' AS ud (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok
+UPDATE ud.atom SET name=CASE id WHEN 1 THEN 'H5''1' ELSE 'a"b' END;
+
+statement ok
+DETACH ud;
+
+query II
+SELECT contains(content, E'1     "H5\'1"\n')::INT, contains(content, E'2     \'a"b\'\n')::INT FROM read_text('__TEST_DIR__/mmcif_surgical_upd.cif');
+----
+1	1
+
 statement ok
 USE memory;
 

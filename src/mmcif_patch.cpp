@@ -30,10 +30,15 @@ struct PatchEdit {
 class PatchLine {
 public:
 	explicit PatchLine(idx_t start_col = 0, string eol_p = "\n")
-	    : out(), col(start_col), first(true), eol(std::move(eol_p)) {
+	    : out(), col(start_col), first(true), after_block(false), eol(std::move(eol_p)) {
 	}
 
 	void Token(const string &token) {
+		// Nothing follows a closing ';' on its line: wwPDB files never do it and
+		// some readers (e.g. pdbe-mmcif-validator) drop such trailing values.
+		if (after_block) {
+			Newline();
+		}
 		if (!first) {
 			out += " ";
 			col += 1;
@@ -58,28 +63,49 @@ public:
 		out += ";";
 		col = 1;
 		first = false;
+		after_block = true;
 	}
 
 	void Newline() {
 		out += eol;
 		col = 0;
 		first = true;
+		after_block = false;
 	}
 
 	bool AtLineStart() const {
 		return col == 0;
 	}
 
+	bool AfterTextBlock() const {
+		return after_block;
+	}
+
 	const string &Str() const {
 		return out;
+	}
+
+	const string &Eol() const {
+		return eol;
 	}
 
 private:
 	string out;
 	idx_t col;
 	bool first;
+	bool after_block;
 	string eol;
 };
+
+// Whether the source line continues with more content after `pos`.
+static bool MmcifPatchLineContinues(const char *src, idx_t size, idx_t pos) {
+	for (idx_t p = pos; p < size && src[p] != '\n'; p++) {
+		if (src[p] != ' ' && src[p] != '\t' && src[p] != '\r') {
+			return true;
+		}
+	}
+	return false;
+}
 
 // Column that `pos` sits at in its source line: the column a replacement value
 // is spliced in at, which decides whether a text field has to break first.
@@ -160,7 +186,9 @@ void EmitValue(PatchLine &line, const string &value, const string &item) {
 			has_double = true;
 		}
 	}
-	if (MmcifPatchSpecialFirstChar(value[0]) || MmcifPatchReservedWord(value)) {
+	// Embedded quotes are legal in bare CIF tokens, but wwPDB files always quote
+	// them and some readers (e.g. pdbe-mmcif-validator) misparse them otherwise.
+	if (MmcifPatchSpecialFirstChar(value[0]) || MmcifPatchReservedWord(value) || has_single || has_double) {
 		multiple_word = true;
 	}
 	if (has_single && has_double) {
@@ -352,7 +380,11 @@ string MmcifPatch::Apply(const MmcifWriteStore &store) {
 				PatchLine line(MmcifPatchColumnOf(src, span.off), MmcifPatchEolAt(src, size, span.off));
 				EmitValue(line, cat.rows[r][c],
 				          cat.name + "." + (c < cat.columns.size() ? cat.columns[c] : to_string(c)));
-				edits.push_back(PatchEdit {span.off, span.off + span.len, line.Str()});
+				string text = line.Str();
+				if (line.AfterTextBlock() && MmcifPatchLineContinues(src, size, span.off + span.len)) {
+					text += line.Eol();
+				}
+				edits.push_back(PatchEdit {span.off, span.off + span.len, text});
 			}
 		}
 
