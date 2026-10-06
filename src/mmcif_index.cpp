@@ -138,6 +138,15 @@ static inline bool MmcifStartsWith(const char *base, idx_t start, idx_t end, con
 	return memcmp(base + start, word, n) == 0;
 }
 
+// A bare token that is a tag or reserved word, not a value: the item before it
+// has no value.
+static bool MmcifIsKeyword(const char *base, idx_t start, idx_t len) {
+	idx_t end = start + len;
+	return base[start] == '_' || MmcifStartsWith(base, start, end, "loop_") ||
+	       MmcifStartsWith(base, start, end, "data_") || MmcifStartsWith(base, start, end, "save_") ||
+	       MmcifStartsWith(base, start, end, "global_") || MmcifStartsWith(base, start, end, "stop_");
+}
+
 // Split a "_category.item" tag into (category, item). Returns false for a bare "_".
 static bool MmcifSplitTag(const char *base, idx_t start, idx_t len, string &category, string &item) {
 	if (len < 1 || base[start] != '_') {
@@ -218,103 +227,56 @@ void MmcifIndex::Build() {
 			} else if (c == '_') {
 				// Tag line.
 				string cat, item;
-				if (MmcifSplitTag(base, s, line_end - s, cat, item)) {
-					if (state == LOOP_HEADER) {
-						// Loop header: this line is a column tag.
-						if (!cur || cur->name != cat) {
-							finalize();
-							cur = make_uniq<MmcifCategory>();
-							cur->name = cat;
-							cur->is_loop = true;
-						}
-						cur->loop_col_map.push_back(column_index(item));
-					} else {
-						// Single-tag line "_cat.item value". A running loop ends
-						// here: close it while it is still `cur`, because the
-						// finalize() below moves it out of data_end's reach.
+				if (!MmcifSplitTag(base, s, line_end - s, cat, item)) {
+					if (state == LOOP_DATA) {
 						end_loop(line_start);
-						if (!cur || cur->name != cat) {
-							finalize();
-							cur = make_uniq<MmcifCategory>();
-							cur->name = cat;
-						}
-						idx_t col = column_index(item);
-						// Parse the value after the tag.
-						idx_t tag_end = s;
-						while (tag_end < line_end && !isspace(static_cast<unsigned char>(base[tag_end]))) {
-							tag_end++;
-						}
-						idx_t val_start = MmcifTrimStart(base, tag_end, line_end);
-						// RCSB writes long / multi-line single-tag values on the line
-						// AFTER the tag ("_cat.item" then ";...\n;"), so when this line
-						// carries no value, look at the next line for a ';' value.
-						bool value_from_next = false;
-						idx_t value_consumed_until = 0; // resume line start (0 = none)
-						if (val_start >= line_end) {
-							idx_t nl = line_end + 1;
-							if (nl < size) {
-								idx_t nel = nl;
-								while (nel < size && base[nel] != '\n') {
-									nel++;
-								}
-								idx_t ns = MmcifTrimStart(base, nl, nel);
-								if (ns < nel && base[ns] == ';') {
-									val_start = ns;
-									value_from_next = true;
-									value_consumed_until = nel + 1;
-								}
-							}
-						}
-						MmcifSingleCell cell;
-						cell.col = col;
-						cell.is_null = false;
-						if (val_start >= line_end && !value_from_next) {
-							cell.off = val_start;
-							cell.len = 0;
-							cell.is_null = true; // empty value -> NULL
-						} else {
-							idx_t val_end = line_end;
-							if (base[val_start] == ';') {
-								// Multi-line semicolon value (may span several lines).
-								const char *out;
-								idx_t len;
-								bool is_null;
-								MmcifValueCursor(base, val_start, size).Next(&out, &len, &is_null);
-								val_end = val_start + len;
-								// Skip the consumed value lines so their content isn't
-								// re-parsed as tags/stray lines.
-								idx_t resume = val_end;
-								while (resume < size && base[resume] != '\n') {
-									resume++;
-								}
-								if (resume < size) {
-									resume++;
-								}
-								value_consumed_until = resume;
-							} else {
-								while (val_end < size && base[val_end] != '\n' && base[val_end] != ';') {
-									val_end++;
-								}
-								// Trim trailing whitespace (single-tag lines carry
-								// trailing spaces/tabs before the newline).
-								while (val_end > val_start && isspace(static_cast<unsigned char>(base[val_end - 1]))) {
-									val_end--;
-								}
-							}
-							cell.off = val_start;
-							cell.len = val_end - val_start;
-							// "." / "?" missing markers -> NULL, matching the loop
-							// cursor (quoted values have len > 1 and stay literal).
-							if (cell.len == 1 && (base[val_start] == '.' || base[val_start] == '?')) {
-								cell.is_null = true;
-							}
-						}
-						cur->singles.push_back(cell);
-						skip_to = value_consumed_until;
 					}
-				}
-				if (state != LOOP_HEADER) {
+				} else if (state == LOOP_HEADER) {
+					// Loop header: this line is a column tag.
+					if (!cur || cur->name != cat) {
+						finalize();
+						cur = make_uniq<MmcifCategory>();
+						cur->name = cat;
+						cur->is_loop = true;
+					}
+					cur->loop_col_map.push_back(column_index(item));
+				} else {
+					// Single-tag item "_cat.item value". A running loop ends here:
+					// close it while it is still `cur`, because the finalize() below
+					// moves it out of data_end's reach.
 					end_loop(line_start);
+					if (!cur || cur->name != cat) {
+						finalize();
+						cur = make_uniq<MmcifCategory>();
+						cur->name = cat;
+					}
+					MmcifSingleCell cell;
+					cell.col = column_index(item);
+					idx_t tag_end = s;
+					while (tag_end < line_end && !isspace(static_cast<unsigned char>(base[tag_end]))) {
+						tag_end++;
+					}
+					// The value follows the tag on its line or on a later one (wwPDB
+					// writes long values, quoted or as a ';' text field, below the tag).
+					const char *out;
+					idx_t len;
+					bool is_null;
+					if (MmcifValueCursor(base, tag_end, size).Next(&out, &len, &is_null) &&
+					    !MmcifIsKeyword(base, out - base, len)) {
+						cell.off = out - base;
+						cell.len = len;
+						cell.is_null = is_null;
+						// Resume after the value, so a value on later lines is not
+						// re-read as tags or stray lines.
+						skip_to = MmcifLineEnd(base, size, cell.off + len - 1);
+					} else {
+						// No value before the next tag or keyword: NULL, anchored
+						// right after the tag so an UPDATE can write one there.
+						cell.off = tag_end;
+						cell.len = 0;
+						cell.is_null = true;
+					}
+					cur->singles.push_back(cell);
 				}
 			} else if (MmcifStartsWith(base, s, line_end, "loop_")) {
 				end_loop(line_start);
@@ -351,6 +313,15 @@ void MmcifIndex::Build() {
 			if (state == LOOP_DATA) {
 				end_loop(line_start);
 			}
+		}
+		if (state == LOOP_DATA && base[line_start] == ';') {
+			// A text field in loop data: skip it whole, so its lines (blank,
+			// or starting with '_' / "loop_") are not read as structure.
+			idx_t p = line_end + 1;
+			while (p < size && base[p] != ';') {
+				p = MmcifLineEnd(base, size, p);
+			}
+			skip_to = MmcifLineEnd(base, size, p);
 		}
 		if (skip_to > line_end + 1) {
 			line_start = skip_to;

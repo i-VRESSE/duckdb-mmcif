@@ -139,6 +139,7 @@ static void MmcifScanIndex(ClientContext &context, DataChunk &output, MmcifGloba
 					if (is_null) {
 						FlatVector::SetNull(*tmp[out_pos], count, true);
 					} else {
+						MmcifUnquote(out, len);
 						ptrs[out_pos][count] = string_t(out, UnsafeNumericCast<uint32_t>(len));
 					}
 				}
@@ -179,7 +180,10 @@ static void MmcifScanIndex(ClientContext &context, DataChunk &output, MmcifGloba
 			} else {
 				auto sc = (col_id < gstate.ncols) ? gstate.single_by_col[col_id] : nullptr;
 				if (sc && !sc->is_null) {
-					ptrs[c][0] = string_t(gstate.bind.index->GetData() + sc->off, UnsafeNumericCast<uint32_t>(sc->len));
+					const char *value = gstate.bind.index->GetData() + sc->off;
+					idx_t len = sc->len;
+					MmcifUnquote(value, len);
+					ptrs[c][0] = string_t(value, UnsafeNumericCast<uint32_t>(len));
 				} else {
 					FlatVector::SetNull(*tmp[c], 0, true);
 				}

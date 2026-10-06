@@ -32,6 +32,9 @@ public:
 	// Rewrite the store's source text with its mutations applied. Throws when a
 	// mutation cannot be placed in the source instead of silently dropping it.
 	static string Apply(const MmcifWriteStore &store);
+	// Throw when `value` of `item` cannot be written to a file, so DML fails at
+	// the statement instead of at COMMIT.
+	static void CheckValue(const string &value, const string &item);
 };
 
 } // namespace duckdb

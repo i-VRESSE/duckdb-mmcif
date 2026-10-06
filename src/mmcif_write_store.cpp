@@ -13,30 +13,11 @@
 
 namespace duckdb {
 
-// Decode one raw cell span into the stored cell string:
-//   - "." / "?"  -> stored literally (null markers)
-//   - 'x' / "x"  -> quotes stripped, interior kept (doubled quotes preserved)
-//   - ";...;"    -> multi-line text, leading ';' and trailing ';'/ws stripped,
-//                   internal newlines kept
-//   - otherwise  -> unquoted token as-is
-static string MmcifDecodeValue(const char *p, idx_t len) {
-	if (len == 0) {
-		return "";
-	}
-	char c = p[0];
-	if (c == '\'' || c == '"') {
-		idx_t interior = len > 2 ? len - 2 : 0;
-		return string(p + 1, interior);
-	}
-	if (c == ';') {
-		idx_t start = 1;
-		idx_t end = len;
-		string val(p + start, end - start);
-		while (!val.empty() && (val.back() == ' ' || val.back() == '\t' || val.back() == '\n' || val.back() == '\r' ||
-		                        val.back() == ';')) {
-			val.pop_back();
-		}
-		return val;
+// The stored string of a raw cell: null markers ("." / "?") verbatim, any
+// other value with its quotes or text-field delimiters stripped.
+static string MmcifCellString(const char *p, idx_t len, bool is_null) {
+	if (!is_null) {
+		MmcifUnquote(p, len);
 	}
 	return string(p, len);
 }
@@ -101,11 +82,7 @@ shared_ptr<MmcifWriteStore> MmcifIndex::Materialize() {
 				li = 0;
 			};
 			while (cursor.Next(&out, &len, &is_null)) {
-				if (is_null) {
-					row[li] = string(out, len); // "." or "?"
-				} else {
-					row[li] = MmcifDecodeValue(out, len);
-				}
+				row[li] = MmcifCellString(out, len, is_null);
 				idx_t off = idx_t(out - content_data);
 				spans[cat->loop_col_map[li]] = MmcifCellSpan {off, len, false};
 				if (li == 0) {
@@ -128,11 +105,7 @@ shared_ptr<MmcifWriteStore> MmcifIndex::Materialize() {
 			idx_t row_first = 0;
 			idx_t row_last = 0;
 			for (auto &sc : cat->singles) {
-				if (sc.is_null) {
-					full[sc.col] = string(content_data + sc.off, sc.len); // "." / "?"
-				} else {
-					full[sc.col] = MmcifDecodeValue(content_data + sc.off, sc.len);
-				}
+				full[sc.col] = MmcifCellString(content_data + sc.off, sc.len, sc.is_null);
 				spans[sc.col] = MmcifCellSpan {sc.off, sc.len, false};
 				if (!any || sc.off < row_first) {
 					row_first = sc.off;

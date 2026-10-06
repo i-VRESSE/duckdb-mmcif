@@ -22,6 +22,7 @@
 
 #include "mmcif_dictionary.hpp"
 #include "mmcif_file.hpp"
+#include "mmcif_patch.hpp"
 #include "mmcif_table_functions.hpp"
 
 namespace duckdb {
@@ -37,9 +38,17 @@ static MmcifWriteCategory *MmcifGetWriteCategory(MmcifWriteStore &store, const s
 }
 
 // NULL -> empty cell -> written back as "?"
-static string MmcifCellToString(const Vector &vec, idx_t row) {
+static string MmcifCellToString(const Vector &vec, idx_t row, const MmcifWriteCategory &cat, idx_t col) {
 	auto val = vec.GetValue(row);
-	return val.IsNull() ? "" : val.ToString();
+	if (val.IsNull()) {
+		return "";
+	}
+	auto str = val.ToString();
+	// Only a value holding ';' can be unwritable; fail the statement, not COMMIT.
+	if (str.find(';') != string::npos) {
+		MmcifPatch::CheckValue(str, cat.name + "." + cat.columns[col]);
+	}
+	return str;
 }
 
 // ---------------------------------------------------------------------------
@@ -119,14 +128,14 @@ public:
 			std::vector<string> row(num_cols, "");
 			for (idx_t c = 0; c < num_cols; c++) {
 				if (column_index_map.empty()) {
-					row[c] = MmcifCellToString(chunk.data[c], r);
+					row[c] = MmcifCellToString(chunk.data[c], r, *cat, c);
 					continue;
 				}
 				auto mapped = column_index_map[c];
 				if (mapped == DConstants::INVALID_INDEX) {
 					continue; // unspecified column -> NULL
 				}
-				row[c] = MmcifCellToString(chunk.data[mapped], r);
+				row[c] = MmcifCellToString(chunk.data[mapped], r, *cat, c);
 			}
 			store->AddRow(*cat, row);
 			gstate.count++;
@@ -194,7 +203,7 @@ public:
 		for (idx_t r = 0; r < chunk.size(); r++) {
 			for (idx_t i = 0; i < columns.size(); i++) {
 				store->UpdateCell(*cat, NumericCast<idx_t>(row_data[r]), columns[i],
-				                  MmcifCellToString(chunk.data[expr_indices[i]], r));
+				                  MmcifCellToString(chunk.data[expr_indices[i]], r, *cat, columns[i]));
 			}
 		}
 		gstate.count += chunk.size();

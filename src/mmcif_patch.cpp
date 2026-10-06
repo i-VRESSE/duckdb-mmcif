@@ -322,6 +322,11 @@ string FormatItemRow(const MmcifWriteCategory &cat, const std::vector<string> &r
 
 } // namespace
 
+void MmcifPatch::CheckValue(const string &value, const string &item) {
+	PatchLine line;
+	EmitValue(line, value, item);
+}
+
 string MmcifPatch::Apply(const MmcifWriteStore &store) {
 	const char *src = store.SourceData();
 	idx_t size = store.SourceSize();
@@ -359,6 +364,9 @@ string MmcifPatch::Apply(const MmcifWriteStore &store) {
 				PatchLine line(span.off - MmcifLineStart(src, span.off), MmcifPatchEolAt(src, size, span.off));
 				EmitValue(line, cat.rows[r][c], cat.name + "." + cat.columns[c]);
 				string text = line.Str();
+				if (span.len == 0 && !line.AfterTextBlock()) {
+					text = " " + text; // the item had no value: separate it from its tag
+				}
 				if (line.AfterTextBlock() && MmcifPatchLineContinues(src, size, span.off + span.len)) {
 					text += line.Eol();
 				}

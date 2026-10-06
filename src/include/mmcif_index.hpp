@@ -22,6 +22,7 @@
 
 #include <atomic>
 #include <cctype>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -48,8 +49,10 @@ inline idx_t MmcifLineEnd(const char *base, idx_t size, idx_t pos) {
 // ---------------------------------------------------------------------------
 // MmcifValueCursor: reads mmCIF data values sequentially from a byte range of
 // the decompressed buffer (row-major loop data). Handles plain tokens, single
-// and double quotes (with '' / "" escaping), triple quotes, and ;...; multi-line
-// values. '.' and '?' are NULL. Returns (offset, len) into the buffer.
+// and double quotes (closed only by a quote followed by whitespace), triple
+// quotes, and ;...; multi-line values opened in column 1. A bare '.' or '?' is
+// NULL. Returns the raw token as (offset, len) into the buffer; MmcifUnquote
+// strips its delimiters.
 //
 // A '#' at a token boundary starts a comment that runs to the end of the line;
 // comment lines are skipped so loop data containing a comment still reads its
@@ -68,13 +71,6 @@ public:
 			return false;
 		}
 		char c = base[pos];
-		if (c == '.' || c == '?') {
-			*out = base + pos;
-			*len = 1;
-			*is_null = true;
-			pos++;
-			return true;
-		}
 		if (c == '\'' || c == '"') {
 			char q = c;
 			idx_t start = pos;
@@ -90,12 +86,10 @@ public:
 					pos++;
 				}
 			} else {
+				// A quote closes the value only when whitespace (or the end)
+				// follows it, so 'it's' is one value.
 				while (pos < end) {
-					if (base[pos] == q) {
-						if (pos + 1 < end && base[pos + 1] == q) {
-							pos += 2; // escaped doubled quote
-							continue;
-						}
+					if (base[pos] == q && (pos + 1 >= end || isspace(static_cast<unsigned char>(base[pos + 1])))) {
 						pos++;
 						break;
 					}
@@ -107,7 +101,8 @@ public:
 			*is_null = false;
 			return true;
 		}
-		if (c == ';') {
+		if (c == ';' && (pos == 0 || base[pos - 1] == '\n')) {
+			// Text field: only a ';' in column 1 opens one.
 			idx_t start = pos;
 			pos++;
 			while (pos < end && base[pos] != '\n') {
@@ -140,7 +135,8 @@ public:
 		}
 		*out = base + start;
 		*len = pos - start;
-		*is_null = false;
+		// A bare "." or "?" is NULL; ".5" or "?x" is an ordinary value.
+		*is_null = *len == 1 && (c == '.' || c == '?');
 		return true;
 	}
 
@@ -165,6 +161,39 @@ private:
 	idx_t end;
 	idx_t pos;
 };
+
+// Strip the delimiters of a raw token from MmcifValueCursor, in place:
+//   'x' / "x" / '''x''' -> x (interior kept verbatim)
+//   ;x\n;               -> x (the closing "\n;" and its '\r' removed)
+//   anything else       -> unchanged
+inline void MmcifUnquote(const char *&p, idx_t &len) {
+	if (len == 0) {
+		return;
+	}
+	char c = p[0];
+	if (c == '\'' || c == '"') {
+		idx_t q = len >= 6 && p[1] == c && p[2] == c && p[len - 1] == c && p[len - 2] == c && p[len - 3] == c ? 3 : 1;
+		if (len >= 2 * q && p[len - 1] == c) {
+			p += q;
+			len -= 2 * q;
+		} else {
+			p += 1; // unterminated: drop the opening quote only
+			len -= 1;
+		}
+		return;
+	}
+	if (c == ';' && memchr(p, '\n', len)) {
+		// A text field always spans lines; a plain ";x" token does not.
+		p += 1;
+		len -= 1;
+		if (len >= 2 && p[len - 1] == ';' && p[len - 2] == '\n') {
+			len -= 2;
+			if (len > 0 && p[len - 1] == '\r') {
+				len--;
+			}
+		}
+	}
+}
 
 // ---------------------------------------------------------------------------
 // MmcifCategory: pass-1 index record for one mmCIF category.

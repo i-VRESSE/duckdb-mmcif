@@ -650,7 +650,7 @@ pdbx_chem_comp_identifier
 query TTT
 SELECT id, type, formula FROM chem_comp;
 ----
-ATP	NON-POLYMER	"C10 H16 N5 O13 P3"
+ATP	NON-POLYMER	C10 H16 N5 O13 P3
 
 # Dictionary-driven column types for single-tag items too
 query TT
@@ -880,3 +880,70 @@ SELECT (contains(content, E'data_SECOND\n') AND contains(content, E'second block
 FROM read_text('__TEST_DIR__/mmcif_surgical_multi.cif');
 ----
 1
+
+# ---------------------------------------------------------------------------
+# Value grammar: values below their tag, quotes closed only before whitespace,
+# text fields inside loops, and delimiters stripped the same in both modes.
+# ---------------------------------------------------------------------------
+
+statement ok
+USE memory;
+
+statement ok
+COPY (SELECT concat_ws(chr(10), 'data_q', '_s.id 1', '_s.title', '''long title on the next line''', '_s.note ''q'' # comment', '_s.empty', '_s.year 2000', 'loop_', '_l.id', '_l.name', '_l.text', '1 ''it''s'' ;x', '2 "C1''"', ';', 'line one', '', '_not.a_tag', ';', '3 .5 ok')) TO '__TEST_DIR__/mmcif_values.cif' (FORMAT CSV, HEADER 0, QUOTE '');
+
+query IIIII
+SELECT * FROM mmcif_scan('__TEST_DIR__/mmcif_values.cif', 's');
+----
+1	long title on the next line	q	NULL	2000
+
+query III
+SELECT id, name, replace(text, chr(10), '|') FROM mmcif_scan('__TEST_DIR__/mmcif_values.cif', 'l');
+----
+1	it's	;x
+2	C1'	|line one||_not.a_tag
+3	.5	ok
+
+# Lines inside a text field do not become categories
+query I
+SELECT string_agg(table_name, ',') FROM mmcif_tables('__TEST_DIR__/mmcif_values.cif');
+----
+s,l
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_values.cif' AS vd (TYPE mmcif, READ_WRITE TRUE);
+
+query IIIII
+SELECT * FROM vd.s;
+----
+1	long title on the next line	q	NULL	2000
+
+query III
+SELECT id, name, replace(text, chr(10), '|') FROM vd.l;
+----
+1	it's	;x
+2	C1'	|line one||_not.a_tag
+3	.5	ok
+
+# A value the file cannot hold fails the statement, not the COMMIT
+statement error
+UPDATE vd.l SET text = E'a\n;b' WHERE id = '1';
+----
+cannot contain a line starting with ';'
+
+# Updating a value below its tag, and an item without a value, keeps the tags intact
+statement ok
+UPDATE vd.s SET title = 'new', empty = 'e';
+
+statement ok
+DETACH vd;
+
+query I
+SELECT contains(content, E'_s.title\nnew\n_s.note ''q'' # comment\n_s.empty e\n')::INT FROM read_text('__TEST_DIR__/mmcif_values.cif');
+----
+1
+
+query IIIII
+SELECT * FROM mmcif_scan('__TEST_DIR__/mmcif_values.cif', 's');
+----
+1	new	q	e	2000
