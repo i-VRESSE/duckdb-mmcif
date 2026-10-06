@@ -727,3 +727,25 @@ TEST_CASE("MmcifPatch deletes tags separated from their values by comments and b
 	REQUIRE(reloaded->FindCategory("entry") == nullptr);
 	REQUIRE(reloaded->FindCategory("other")->rows[0][0] == "keep");
 }
+
+TEST_CASE("MmcifPatch preserves comments inside deleted loop and key-value rows", "[mmcif][patch]") {
+	for (const auto &eol : {std::string("\n"), std::string("\r\n")}) {
+		TempCif loop("mmcif_patch_delete_inner_loop_comment.cif",
+		             "data_t" + eol + "loop_" + eol + "_entry.id" + eol + "_entry.note" + eol +
+		                 "A" + eol + "# inside row" + eol + "B" + eol + "C D" + eol);
+		auto loop_store = PatchFixture(loop);
+		loop_store->DeleteRows(*loop_store->FindCategory("entry"), {0});
+		REQUIRE(MmcifPatch::Apply(*loop_store) ==
+		        "data_t" + eol + "loop_" + eol + "_entry.id" + eol + "_entry.note" + eol +
+		            "# inside row" + eol + "C D" + eol);
+
+		TempCif single("mmcif_patch_delete_inner_single_comment.cif",
+		               "data_t" + eol + "_entry.id" + eol + "# before value" + eol + "A" + eol +
+		                   "# between items" + eol + "_entry.note" + eol + ";body" + eol + "# part of value" +
+		                   eol + ";" + eol + "_other.id keep" + eol);
+		auto single_store = PatchFixture(single);
+		single_store->DeleteRows(*single_store->FindCategory("entry"), {0});
+		REQUIRE(MmcifPatch::Apply(*single_store) ==
+		        "data_t" + eol + "# before value" + eol + "# between items" + eol + "_other.id keep" + eol);
+	}
+}

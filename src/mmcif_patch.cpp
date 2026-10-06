@@ -224,8 +224,8 @@ static bool MmcifPatchBlank(char c) {
 	return c == ' ' || c == '\t' || c == '\r';
 }
 
-// Source bytes to cut for the deleted rows of one category. Adjacent deleted
-// rows (only whitespace between them) are cut as one run. A run that leaves
+// Source bytes to cut for the deleted tokens of one category. Adjacent deleted
+// tokens (only whitespace between them) are cut as one run. A run that leaves
 // nothing but whitespace on its lines takes those whole lines; otherwise it
 // shares a line with surviving rows and takes just one separator with it, so
 // the remaining rows keep their layout and no blank line is left behind.

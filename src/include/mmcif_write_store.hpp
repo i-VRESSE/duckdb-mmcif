@@ -67,7 +67,7 @@ struct MmcifWriteCategory {
 	// Parallel to rows: where each row and each cell came from in the source.
 	std::vector<MmcifRowSpan> row_spans;
 	std::vector<std::vector<MmcifCellSpan>> cell_spans;
-	// Rows removed by DML; their source bytes are cut out on write-back.
+	// Token spans removed by DML; gaps containing comments are kept on write-back.
 	std::vector<MmcifRowSpan> deleted_rows;
 };
 

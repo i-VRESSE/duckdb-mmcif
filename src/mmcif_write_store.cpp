@@ -141,8 +141,18 @@ void MmcifWriteStore::DeleteRows(MmcifWriteCategory &cat, const std::vector<idx_
 	for (idx_t i = rows.size(); i > 0; i--) {
 		idx_t r = rows[i - 1];
 		if (cat.row_spans[r].start != MMCIF_NO_SPAN) {
-			// Remember which bytes to cut out of the source file.
-			cat.deleted_rows.push_back(cat.row_spans[r]);
+			// Remember tokens separately: comments between cells/items do not
+			// belong to the deleted row. The patch merges whitespace-only gaps.
+			if (!cat.is_loop) {
+				for (auto &cell : SourceCategory(cat.name)->singles) {
+					cat.deleted_rows.push_back(MmcifRowSpan {cell.tag_off, cell.tag_end});
+				}
+			}
+			for (auto &cell : cat.cell_spans[r]) {
+				if (cell.off != MMCIF_NO_SPAN && cell.len != 0) {
+					cat.deleted_rows.push_back(MmcifRowSpan {cell.off, cell.off + cell.len});
+				}
+			}
 		}
 		cat.rows.erase(cat.rows.begin() + r);
 		cat.row_spans.erase(cat.row_spans.begin() + r);
