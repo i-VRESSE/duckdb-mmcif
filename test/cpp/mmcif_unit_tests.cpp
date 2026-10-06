@@ -360,6 +360,37 @@ TEST_CASE("MmcifIndex counts and materializes a partial trailing row", "[mmcif][
 	REQUIRE(last[ColIndex(*sp, "b")] == "");
 }
 
+TEST_CASE("MmcifIndex::Load detects a same-size rewrite without a context", "[mmcif][index][cache]") {
+	// Write-mode attaches load without a ClientContext. A size-only stamp let a
+	// cached index survive an external rewrite of identical byte length, so the
+	// next write-mode attach materialized stale data.
+	TempCif fixture("idx_same_size_rewrite.cif", "data_b\n_q.a 1\n");
+	auto first = MmcifIndex::Load(fixture.Str(), nullptr);
+	REQUIRE(first);
+	REQUIRE(MmcifIndex::Load(fixture.Str(), nullptr) == first); // unchanged file is served from the cache
+	auto first_store = first->Materialize();
+	auto *q1 = first_store->FindCategory("q");
+	REQUIRE(q1);
+	REQUIRE(first_store->GetRow(*q1, 0)[0] == "1");
+
+	// Rewrite in place with same length and restore the mtime, simulating a
+	// rewrite within the filesystem's mtime granularity.
+	auto original_mtime = std::filesystem::last_write_time(fixture.Str());
+	{
+		std::ofstream ofs(fixture.Str(), std::ios::binary | std::ios::trunc);
+		ofs << "data_b\n_q.a 2\n";
+	}
+	std::filesystem::last_write_time(fixture.Str(), original_mtime);
+
+	auto second = MmcifIndex::Load(fixture.Str(), nullptr);
+	REQUIRE(second);
+	REQUIRE(second != first);
+	auto store = second->Materialize();
+	auto *q2 = store->FindCategory("q");
+	REQUIRE(q2);
+	REQUIRE(store->GetRow(*q2, 0)[0] == "2");
+}
+
 TEST_CASE("MmcifIndex::FindCategory returns null for a missing category", "[mmcif][index]") {
 	TempCif fixture("idx_missing.cif", "data_b\nloop_\n_q.a\n1\n");
 	auto index = MmcifIndex::Load(fixture.Str(), nullptr);
