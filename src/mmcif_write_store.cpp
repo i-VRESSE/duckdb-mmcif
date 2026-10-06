@@ -104,6 +104,18 @@ shared_ptr<MmcifWriteStore> MmcifIndex::Materialize() {
 			idx_t li = 0;
 			idx_t row_first = 0;
 			idx_t row_last = 0;
+			auto flush_row = [&]() {
+				std::vector<string> full(ncols, "");
+				for (idx_t i = 0; i < loop_ncols; i++) {
+					full[cat->loop_col_map[i]] = std::move(row[i]);
+				}
+				wc.rows.push_back(std::move(full));
+				wc.row_spans.push_back(MmcifRowSpan {row_first, row_last});
+				wc.cell_spans.push_back(std::move(spans));
+				spans.assign(ncols, MmcifCellSpan {});
+				row.assign(loop_ncols, "");
+				li = 0;
+			};
 			while (cursor.Next(&out, &len, &is_null)) {
 				if (is_null) {
 					row[li] = string(out, len); // "." or "?"
@@ -118,27 +130,11 @@ shared_ptr<MmcifWriteStore> MmcifIndex::Materialize() {
 				row_last = off + len;
 				li++;
 				if (li == loop_ncols) {
-					std::vector<string> full(ncols, "");
-					for (idx_t i = 0; i < loop_ncols; i++) {
-						full[cat->loop_col_map[i]] = std::move(row[i]);
-					}
-					wc.rows.push_back(std::move(full));
-					wc.row_spans.push_back(MmcifRowSpan {row_first, row_last});
-					wc.cell_spans.push_back(std::move(spans));
-					spans.assign(ncols, MmcifCellSpan {});
-					row.assign(loop_ncols, "");
-					li = 0;
+					flush_row();
 				}
 			}
 			if (li != 0) {
-				// Partial trailing row.
-				std::vector<string> full(ncols, "");
-				for (idx_t i = 0; i < loop_ncols; i++) {
-					full[cat->loop_col_map[i]] = std::move(row[i]);
-				}
-				wc.rows.push_back(std::move(full));
-				wc.row_spans.push_back(MmcifRowSpan {row_first, row_last});
-				wc.cell_spans.push_back(std::move(spans));
+				flush_row(); // partial trailing row
 			}
 		} else {
 			// Single-tag category: exactly one row, cells keyed by full column.
@@ -205,35 +201,22 @@ void MmcifWriteStore::DeleteRows(MmcifWriteCategory &cat, const std::vector<unsi
 	// so indices stay valid.
 	for (idx_t i = rows.size(); i > 0; i--) {
 		idx_t r = rows[i - 1];
-		if (r < cat.row_spans.size() && cat.row_spans[r].start != MMCIF_NO_SPAN) {
+		if (cat.row_spans[r].start != MMCIF_NO_SPAN) {
 			// Remember which bytes to cut out of the source file.
 			cat.deleted_rows.push_back(cat.row_spans[r]);
 		}
 		cat.rows.erase(cat.rows.begin() + r);
-		if (r < cat.row_spans.size()) {
-			cat.row_spans.erase(cat.row_spans.begin() + r);
-		}
-		if (r < cat.cell_spans.size()) {
-			cat.cell_spans.erase(cat.cell_spans.begin() + r);
-		}
+		cat.row_spans.erase(cat.row_spans.begin() + r);
+		cat.cell_spans.erase(cat.cell_spans.begin() + r);
 	}
 	dirty = true;
 }
 
-void MmcifWriteStore::UpdateCell(MmcifWriteCategory &cat, idx_t row, const string &col, const string &value) {
-	idx_t col_index = 0;
-	for (idx_t i = 0; i < cat.columns.size(); i++) {
-		if (StringUtil::CIEquals(cat.columns[i], col)) {
-			col_index = i;
-			break;
-		}
-	}
-	cat.rows[row][col_index] = value;
-	if (row < cat.cell_spans.size() && col_index < cat.cell_spans[row].size()) {
-		// Marks the source bytes to replace. A cell with no source span lives
-		// in an inserted row, whose whole line is generated on write-back.
-		cat.cell_spans[row][col_index].edited = true;
-	}
+void MmcifWriteStore::UpdateCell(MmcifWriteCategory &cat, idx_t row, idx_t col, const string &value) {
+	cat.rows[row][col] = value;
+	// Marks the source bytes to replace. A cell with no source span lives in an
+	// inserted row, whose whole line is generated on write-back.
+	cat.cell_spans[row][col].edited = true;
 	dirty = true;
 }
 

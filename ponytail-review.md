@@ -26,7 +26,7 @@ Delete:
 - **`MmcifWriteGlobalState::lock`**: all three operators set `ParallelSink() == false`, so the lock does nothing.
 - **Leftover files**: [concurrent-write-issues.md](concurrent-write-issues.md) says "TODO remove this file before PR is merged". There are also untracked `*.cif(.gz)` files at the repo root.
 
-## 3. Simplifications
+## 3. Simplifications — DONE
 
 - **DML operators** ([mmcif_catalog.cpp](src/mmcif_catalog.cpp)): Insert, Delete and Update each repeat the same eight overrides (`IsSink`, `ParallelSink`, `SinkOrderDependent`, `IsSource`, `GetGlobalSinkState`, `GetLocalSinkState`, `GetGlobalSourceState`, `GetDataInternal`). One `MmcifWriteOperator` base class saves about 80 lines.
 - **`UpdateCell`**: it takes a column name and looks up its index with a case-insensitive search, but the caller already has the index. It also copies `cat->columns` on every chunk. Pass `idx_t col` directly.

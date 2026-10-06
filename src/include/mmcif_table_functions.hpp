@@ -49,6 +49,10 @@ struct MmcifBindData : public FunctionData {
 // the attached-table scan.
 TableFunction MmcifScanFunction();
 
+// Read-only bind: point result at the index category and set its column
+// names and dictionary types. Throws if the category is absent.
+void MmcifBindIndex(MmcifBindData &result, shared_ptr<MmcifIndex> index, const string &table_name);
+
 // Registers mmcif_scan, mmcif_tables, mmcif_columns, and mmcif_relationships on the loader.
 void MmcifRegisterTableFunctions(ExtensionLoader &loader);
 

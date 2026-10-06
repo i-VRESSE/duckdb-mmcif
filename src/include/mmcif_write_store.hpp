@@ -84,7 +84,7 @@ public:
 	std::vector<string> GetCategoryNames() const;
 	void AddRow(MmcifWriteCategory &cat, const std::vector<string> &row);
 	void DeleteRows(MmcifWriteCategory &cat, const std::vector<unsigned int> &rows);
-	void UpdateCell(MmcifWriteCategory &cat, idx_t row, const string &col, const string &value);
+	void UpdateCell(MmcifWriteCategory &cat, idx_t row, idx_t col, const string &value);
 
 	// COMMIT/detach/checkpoint write the store back to disk only when it is
 	// dirty (some DML mutated it since materialization). Read-only transactions

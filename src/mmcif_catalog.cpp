@@ -60,17 +60,18 @@ struct MmcifWriteGlobalState : public GlobalSinkState {
 	std::vector<unsigned int> delete_indices;
 };
 
-class MmcifInsertOperator : public PhysicalOperator {
+// Shared sink/source plumbing: a single-threaded, order-dependent sink that
+// returns the affected row count as one BIGINT.
+class MmcifWriteOperator : public PhysicalOperator {
 public:
-	MmcifInsertOperator(PhysicalPlan &physical_plan, vector<LogicalType> types, idx_t estimated_cardinality,
-	                    MmcifCatalog &catalog, string table_name, vector<idx_t> column_index_map)
-	    : PhysicalOperator(physical_plan, PhysicalOperatorType::INSERT, std::move(types), estimated_cardinality),
-	      catalog(catalog), table_name(std::move(table_name)), column_index_map(std::move(column_index_map)) {
+	MmcifWriteOperator(PhysicalPlan &physical_plan, PhysicalOperatorType type, vector<LogicalType> types,
+	                   idx_t estimated_cardinality, MmcifCatalog &catalog, string table_name)
+	    : PhysicalOperator(physical_plan, type, std::move(types), estimated_cardinality), catalog(catalog),
+	      table_name(std::move(table_name)) {
 	}
 
 	MmcifCatalog &catalog;
 	string table_name;
-	vector<idx_t> column_index_map; // empty => positional insert into all columns
 
 	bool IsSink() const override {
 		return true;
@@ -91,6 +92,29 @@ public:
 	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override {
 		return make_uniq<LocalSinkState>();
 	}
+	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override {
+		return make_uniq<GlobalSourceState>();
+	}
+	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                 OperatorSourceInput &input) const override {
+		auto &g = sink_state->Cast<MmcifWriteGlobalState>();
+		chunk.SetCardinality(1);
+		chunk.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(g.count)));
+		return SourceResultType::FINISHED;
+	}
+};
+
+class MmcifInsertOperator : public MmcifWriteOperator {
+public:
+	MmcifInsertOperator(PhysicalPlan &physical_plan, vector<LogicalType> types, idx_t estimated_cardinality,
+	                    MmcifCatalog &catalog, string table_name, vector<idx_t> column_index_map)
+	    : MmcifWriteOperator(physical_plan, PhysicalOperatorType::INSERT, std::move(types), estimated_cardinality,
+	                         catalog, std::move(table_name)),
+	      column_index_map(std::move(column_index_map)) {
+	}
+
+	vector<idx_t> column_index_map; // empty => positional insert into all columns
+
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override {
 		auto &gstate = input.global_state.Cast<MmcifWriteGlobalState>();
 		auto store = catalog.GetWriteStore();
@@ -115,50 +139,19 @@ public:
 		}
 		return SinkResultType::NEED_MORE_INPUT;
 	}
-	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override {
-		return make_uniq<GlobalSourceState>();
-	}
-	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
-	                                 OperatorSourceInput &input) const override {
-		auto &g = sink_state->Cast<MmcifWriteGlobalState>();
-		chunk.SetCardinality(1);
-		chunk.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(g.count)));
-		return SourceResultType::FINISHED;
-	}
 };
 
-class MmcifDeleteOperator : public PhysicalOperator {
+class MmcifDeleteOperator : public MmcifWriteOperator {
 public:
 	MmcifDeleteOperator(PhysicalPlan &physical_plan, vector<LogicalType> types, idx_t estimated_cardinality,
 	                    MmcifCatalog &catalog, string table_name, idx_t row_id_index)
-	    : PhysicalOperator(physical_plan, PhysicalOperatorType::DELETE_OPERATOR, std::move(types),
-	                       estimated_cardinality),
-	      catalog(catalog), table_name(std::move(table_name)), row_id_index(row_id_index) {
+	    : MmcifWriteOperator(physical_plan, PhysicalOperatorType::DELETE_OPERATOR, std::move(types),
+	                         estimated_cardinality, catalog, std::move(table_name)),
+	      row_id_index(row_id_index) {
 	}
 
-	MmcifCatalog &catalog;
-	string table_name;
 	idx_t row_id_index;
 
-	bool IsSink() const override {
-		return true;
-	}
-	bool ParallelSink() const override {
-		return false;
-	}
-	bool SinkOrderDependent() const override {
-		return true;
-	}
-	bool IsSource() const override {
-		return true;
-	}
-
-	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override {
-		return make_uniq<MmcifWriteGlobalState>();
-	}
-	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override {
-		return make_uniq<LocalSinkState>();
-	}
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override {
 		auto &gstate = input.global_state.Cast<MmcifWriteGlobalState>();
 		chunk.Flatten();
@@ -183,77 +176,35 @@ public:
 		}
 		return SinkCombineResultType::FINISHED;
 	}
-	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override {
-		return make_uniq<GlobalSourceState>();
-	}
-	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
-	                                 OperatorSourceInput &input) const override {
-		auto &g = sink_state->Cast<MmcifWriteGlobalState>();
-		chunk.SetCardinality(1);
-		chunk.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(g.count)));
-		return SourceResultType::FINISHED;
-	}
 };
 
-class MmcifUpdateOperator : public PhysicalOperator {
+class MmcifUpdateOperator : public MmcifWriteOperator {
 public:
 	MmcifUpdateOperator(PhysicalPlan &physical_plan, vector<LogicalType> types, idx_t estimated_cardinality,
 	                    MmcifCatalog &catalog, string table_name, vector<idx_t> columns, vector<idx_t> expr_indices)
-	    : PhysicalOperator(physical_plan, PhysicalOperatorType::UPDATE, std::move(types), estimated_cardinality),
-	      catalog(catalog), table_name(std::move(table_name)), columns(std::move(columns)),
-	      expr_indices(std::move(expr_indices)) {
+	    : MmcifWriteOperator(physical_plan, PhysicalOperatorType::UPDATE, std::move(types), estimated_cardinality,
+	                         catalog, std::move(table_name)),
+	      columns(std::move(columns)), expr_indices(std::move(expr_indices)) {
 	}
 
-	MmcifCatalog &catalog;
-	string table_name;
 	vector<idx_t> columns;      // physical column index to update
 	vector<idx_t> expr_indices; // chunk index holding the new value
 
-	bool IsSink() const override {
-		return true;
-	}
-	bool ParallelSink() const override {
-		return false;
-	}
-	bool SinkOrderDependent() const override {
-		return true;
-	}
-	bool IsSource() const override {
-		return true;
-	}
-
-	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override {
-		return make_uniq<MmcifWriteGlobalState>();
-	}
-	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override {
-		return make_uniq<LocalSinkState>();
-	}
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override {
 		auto &gstate = input.global_state.Cast<MmcifWriteGlobalState>();
 		auto store = catalog.GetWriteStore();
 		auto cat = MmcifGetWriteCategory(*store, table_name);
-		auto col_names = cat->columns;
 		chunk.Flatten();
 		auto &row_ids = chunk.data[chunk.ColumnCount() - 1];
 		auto row_data = FlatVector::GetData<int64_t>(row_ids);
 		for (idx_t r = 0; r < chunk.size(); r++) {
 			for (idx_t i = 0; i < columns.size(); i++) {
-				store->UpdateCell(*cat, NumericCast<idx_t>(row_data[r]), col_names[columns[i]],
+				store->UpdateCell(*cat, NumericCast<idx_t>(row_data[r]), columns[i],
 				                  MmcifCellToString(chunk.data[expr_indices[i]], r));
 			}
 		}
 		gstate.count += chunk.size();
 		return SinkResultType::NEED_MORE_INPUT;
-	}
-	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override {
-		return make_uniq<GlobalSourceState>();
-	}
-	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
-	                                 OperatorSourceInput &input) const override {
-		auto &g = sink_state->Cast<MmcifWriteGlobalState>();
-		chunk.SetCardinality(1);
-		chunk.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(g.count)));
-		return SourceResultType::FINISHED;
 	}
 };
 
@@ -290,18 +241,7 @@ TableFunction MmcifTableEntry::GetScanFunction(ClientContext &context, unique_pt
 		}
 	} else {
 		// Read-only: shared lazy index, streamed scan. No materialization.
-		auto index = catalog->GetIndex(&context);
-		auto cat = index->FindCategory(table_name);
-		if (!cat || cat->columns.empty()) {
-			throw BinderException("mmcif: category '%s' not present in file '%s'", table_name.c_str(),
-			                      file_name.c_str());
-		}
-		result->index = std::move(index);
-		result->category = cat;
-		result->column_names = cat->columns;
-		for (auto &col : result->column_names) {
-			result->column_types.push_back(DictionaryIndex::Get().LookupType(table_name, col));
-		}
+		MmcifBindIndex(*result, catalog->GetIndex(&context), table_name);
 	}
 
 	bind_data = std::move(result);

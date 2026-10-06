@@ -23,13 +23,12 @@ namespace duckdb {
 // changes; remote paths are cached by path only (may be stale).
 // ---------------------------------------------------------------------------
 
-static mutex g_index_cache_lock;
-static unordered_map<string, weak_ptr<MmcifIndex>> g_index_cache;
-
-// Per-path file stamps used to skip stat on unchanged files. Hoisted out of
-// MmcifFileChanged so InvalidateCache can drop a stamp after a write-back.
-static mutex g_stamp_lock;
-static case_insensitive_map_t<string> g_stamps;
+struct MmcifCacheEntry {
+	weak_ptr<MmcifIndex> index;
+	string stamp; // MmcifFileStamp at load time; "" for remote paths
+};
+static mutex g_cache_lock;
+static unordered_map<string, MmcifCacheEntry> g_cache;
 
 // Stamp of a local file: identity (device/inode or volume/file index), size,
 // and sub-second modification and change times. The change time also moves
@@ -53,7 +52,7 @@ static string MmcifFileStamp(const string &path) {
 	if (!ok) {
 		return "";
 	}
-	return StringUtil::Format("%s|win|%llu|%llu|%llu|%lld|%lld", path, (unsigned long long)info.dwVolumeSerialNumber,
+	return StringUtil::Format("win|%llu|%llu|%llu|%lld|%lld", (unsigned long long)info.dwVolumeSerialNumber,
 	                          ((unsigned long long)info.nFileIndexHigh << 32) | info.nFileIndexLow,
 	                          ((unsigned long long)info.nFileSizeHigh << 32) | info.nFileSizeLow,
 	                          (long long)basic.LastWriteTime.QuadPart, (long long)basic.ChangeTime.QuadPart);
@@ -69,7 +68,7 @@ static string MmcifFileStamp(const string &path) {
 	auto mtime_ns = (long long)st.st_mtim.tv_nsec;
 	auto ctime_ns = (long long)st.st_ctim.tv_nsec;
 #endif
-	return StringUtil::Format("%s|posix|%llu|%llu|%lld|%lld.%lld|%lld.%lld", path, (unsigned long long)st.st_dev,
+	return StringUtil::Format("posix|%llu|%llu|%lld|%lld.%lld|%lld.%lld", (unsigned long long)st.st_dev,
 	                          (unsigned long long)st.st_ino, (long long)st.st_size, (long long)st.st_mtime, mtime_ns,
 	                          (long long)st.st_ctime, ctime_ns);
 #endif
@@ -78,26 +77,21 @@ static string MmcifFileStamp(const string &path) {
 // Local-file staleness check: stamp differs from the one recorded when the
 // cached copy was loaded. Remote paths cannot be cheaply stat'd and are cached
 // by path only (may be stale).
-static bool MmcifFileChanged(const string &path) {
+static bool MmcifFileChanged(const string &path, const string &loaded_stamp) {
 	if (MmcifFile::IsRemotePath(path)) {
 		return false;
 	}
-	auto key = MmcifFileStamp(path);
-	if (key.empty()) {
-		return true; // file missing -> treat as changed
-	}
-	lock_guard<mutex> l(g_stamp_lock);
-	auto it = g_stamps.find(path);
-	return it == g_stamps.end() || it->second != key;
+	auto now = MmcifFileStamp(path);
+	return now.empty() || now != loaded_stamp; // missing file -> changed
 }
 
 shared_ptr<MmcifIndex> MmcifIndex::Load(const string &path, optional_ptr<ClientContext> context) {
 	{
-		lock_guard<mutex> l(g_index_cache_lock);
-		auto it = g_index_cache.find(path);
-		if (it != g_index_cache.end()) {
-			auto cached = it->second.lock();
-			if (cached && !MmcifFileChanged(path)) {
+		lock_guard<mutex> l(g_cache_lock);
+		auto it = g_cache.find(path);
+		if (it != g_cache.end()) {
+			auto cached = it->second.index.lock();
+			if (cached && !MmcifFileChanged(path, it->second.stamp)) {
 				return cached;
 			}
 		}
@@ -118,22 +112,14 @@ shared_ptr<MmcifIndex> MmcifIndex::Load(const string &path, optional_ptr<ClientC
 	auto index = shared_ptr<MmcifIndex>(new MmcifIndex(std::move(text), original_text_size));
 	index->Build();
 
-	lock_guard<mutex> l(g_index_cache_lock);
-	g_index_cache[path] = weak_ptr<MmcifIndex>(index);
-	lock_guard<mutex> sl(g_stamp_lock);
-	if (stamp.empty()) {
-		g_stamps.erase(path);
-	} else {
-		g_stamps[path] = stamp;
-	}
+	lock_guard<mutex> l(g_cache_lock);
+	g_cache[path] = MmcifCacheEntry {weak_ptr<MmcifIndex>(index), std::move(stamp)};
 	return index;
 }
 
 void MmcifIndex::InvalidateCache(const string &path) {
-	lock_guard<mutex> l(g_index_cache_lock);
-	g_index_cache.erase(path);
-	lock_guard<mutex> sl(g_stamp_lock);
-	g_stamps.erase(path);
+	lock_guard<mutex> l(g_cache_lock);
+	g_cache.erase(path);
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +188,23 @@ void MmcifIndex::Build() {
 		}
 		cur = nullptr;
 	};
+	// Close a running loop at line_start (the first line that is not loop data).
+	auto end_loop = [&](idx_t line_start) {
+		if (state == LOOP_DATA && cur) {
+			cur->data_end = line_start;
+		}
+		state = TOP;
+	};
+	// Index of item in cur's columns, appending it when first seen.
+	auto column_index = [&](const string &item) {
+		for (idx_t i = 0; i < cur->columns.size(); i++) {
+			if (cur->columns[i] == item) {
+				return i;
+			}
+		}
+		cur->columns.push_back(item);
+		return cur->columns.size() - 1;
+	};
 
 	idx_t line_start = 0;
 	idx_t skip_to = 0; // when > line_end, the loop jumps to this line start
@@ -229,41 +232,18 @@ void MmcifIndex::Build() {
 							cur->name = cat;
 							cur->is_loop = true;
 						}
-						// Add to the loop column list and record the full-column map.
-						idx_t full_col = cur->columns.size();
-						for (idx_t i = 0; i < full_col; i++) {
-							if (cur->columns[i] == item) {
-								full_col = i;
-								break;
-							}
-						}
-						if (full_col == cur->columns.size()) {
-							cur->columns.push_back(item);
-						}
-						cur->loop_col_map.push_back(full_col);
+						cur->loop_col_map.push_back(column_index(item));
 					} else {
 						// Single-tag line "_cat.item value". A running loop ends
 						// here: close it while it is still `cur`, because the
 						// finalize() below moves it out of data_end's reach.
-						if (state == LOOP_DATA && cur) {
-							cur->data_end = line_start;
-							state = TOP;
-						}
+						end_loop(line_start);
 						if (!cur || cur->name != cat) {
 							finalize();
 							cur = make_uniq<MmcifCategory>();
 							cur->name = cat;
 						}
-						idx_t col = cur->columns.size();
-						for (idx_t i = 0; i < col; i++) {
-							if (cur->columns[i] == item) {
-								col = i;
-								break;
-							}
-						}
-						if (col == cur->columns.size()) {
-							cur->columns.push_back(item);
-						}
+						idx_t col = column_index(item);
 						// Parse the value after the tag.
 						idx_t tag_end = s;
 						while (tag_end < line_end && !isspace(static_cast<unsigned char>(base[tag_end]))) {
@@ -301,26 +281,11 @@ void MmcifIndex::Build() {
 							idx_t val_end = line_end;
 							if (base[val_start] == ';') {
 								// Multi-line semicolon value (may span several lines).
-								idx_t p = val_start + 1;
-								while (p < size && base[p] != '\n') {
-									p++;
-								}
-								if (p < size) {
-									p++;
-								}
-								while (p < size) {
-									if (base[p] == ';') {
-										p++;
-										break;
-									}
-									while (p < size && base[p] != '\n') {
-										p++;
-									}
-									if (p < size) {
-										p++;
-									}
-								}
-								val_end = p;
+								const char *out;
+								idx_t len;
+								bool is_null;
+								MmcifValueCursor(base, val_start, size).Next(&out, &len, &is_null);
+								val_end = val_start + len;
 								// Skip the consumed value lines so their content isn't
 								// re-parsed as tags/stray lines.
 								idx_t resume = val_end;
@@ -354,21 +319,14 @@ void MmcifIndex::Build() {
 					}
 				}
 				if (state != LOOP_HEADER) {
-					if (state == LOOP_DATA && cur) {
-						cur->data_end = line_start;
-					}
-					state = TOP;
+					end_loop(line_start);
 				}
 			} else if (MmcifStartsWith(base, s, line_end, "loop_")) {
-				if (state == LOOP_DATA && cur) {
-					cur->data_end = line_start;
-				}
+				end_loop(line_start);
 				finalize();
 				state = LOOP_HEADER;
 			} else if (MmcifStartsWith(base, s, line_end, "data_")) {
-				if (state == LOOP_DATA && cur) {
-					cur->data_end = line_start;
-				}
+				end_loop(line_start);
 				finalize();
 				if (indexed) {
 					// Later data blocks are ignored (keep-first-block behavior);
@@ -377,15 +335,11 @@ void MmcifIndex::Build() {
 				}
 				data_block_name.assign(base + s + 5, (line_end - s) - 5);
 				indexed = true;
-				state = TOP;
 			} else if (MmcifStartsWith(base, s, line_end, "save_")) {
 				// save_ frame (save_xxx ... save_): not indexed; stop the
 				// current loop. The write-back patch keeps its bytes verbatim.
-				if (state == LOOP_DATA && cur) {
-					cur->data_end = line_start;
-				}
+				end_loop(line_start);
 				finalize();
-				state = TOP;
 			} else if (state == LOOP_HEADER) {
 				// First data line of a loop: data begins.
 				if (!cur) {
@@ -399,9 +353,8 @@ void MmcifIndex::Build() {
 			}
 		} else {
 			// Blank line: terminates loop data.
-			if (state == LOOP_DATA && cur) {
-				cur->data_end = line_start;
-				state = TOP;
+			if (state == LOOP_DATA) {
+				end_loop(line_start);
 			}
 		}
 		if (skip_to > line_end + 1) {
@@ -430,12 +383,8 @@ void MmcifIndex::GetCategoryNames(vector<string> &names) {
 }
 
 idx_t MmcifIndex::GetRowCount(MmcifCategory &cat) {
+	// Counting is idempotent: a concurrent first call at worst counts twice.
 	auto known = cat.row_count.load();
-	if (known != idx_t(-1)) {
-		return known;
-	}
-	lock_guard<mutex> l(row_count_lock);
-	known = cat.row_count.load();
 	if (known != idx_t(-1)) {
 		return known;
 	}

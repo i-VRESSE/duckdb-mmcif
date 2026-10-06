@@ -30,16 +30,7 @@ namespace duckdb {
 // ---------------------------------------------------------------------------
 
 unique_ptr<FunctionData> MmcifBindData::Copy() const {
-	auto result = make_uniq<MmcifBindData>();
-	result->file_name = file_name;
-	result->table_name = table_name;
-	result->column_names = column_names;
-	result->column_types = column_types;
-	result->index = index;
-	result->category = category;
-	result->rows = rows;
-	result->table_entry = table_entry;
-	return std::move(result);
+	return make_uniq<MmcifBindData>(*this);
 }
 
 bool MmcifBindData::Equals(const FunctionData &other) const {
@@ -85,7 +76,7 @@ struct MmcifGlobalState : public GlobalTableFunctionState {
 	}
 };
 
-static void MmcifLoadIndex(MmcifBindData &result, shared_ptr<MmcifIndex> index, const string &table_name) {
+void MmcifBindIndex(MmcifBindData &result, shared_ptr<MmcifIndex> index, const string &table_name) {
 	auto cat = index->FindCategory(table_name);
 	if (!cat || cat->columns.empty()) {
 		throw BinderException("mmcif: category '%s' not present in block '%s'", table_name.c_str(),
@@ -94,6 +85,9 @@ static void MmcifLoadIndex(MmcifBindData &result, shared_ptr<MmcifIndex> index, 
 	result.index = std::move(index);
 	result.category = cat;
 	result.column_names = cat->columns;
+	for (auto &col : result.column_names) {
+		result.column_types.push_back(DictionaryIndex::Get().LookupType(table_name, col));
+	}
 }
 
 static unique_ptr<FunctionData> MmcifBind(ClientContext &context, TableFunctionBindInput &input,
@@ -104,15 +98,9 @@ static unique_ptr<FunctionData> MmcifBind(ClientContext &context, TableFunctionB
 	result->file_name = file_name;
 	result->table_name = table_name;
 
-	auto index = MmcifIndex::Load(file_name, &context);
-	MmcifLoadIndex(*result, std::move(index), table_name);
-
-	for (auto &col : result->column_names) {
-		auto type = DictionaryIndex::Get().LookupType(table_name, col);
-		result->column_types.push_back(type);
-		names.push_back(col);
-		return_types.push_back(std::move(type));
-	}
+	MmcifBindIndex(*result, MmcifIndex::Load(file_name, &context), table_name);
+	names.assign(result->column_names.begin(), result->column_names.end());
+	return_types.assign(result->column_types.begin(), result->column_types.end());
 	return std::move(result);
 }
 
@@ -263,9 +251,7 @@ struct MmcifMetaBindData : public FunctionData {
 	std::vector<std::vector<Value>> rows;
 
 	unique_ptr<FunctionData> Copy() const override {
-		auto result = make_uniq<MmcifMetaBindData>();
-		result->rows = rows;
-		return std::move(result);
+		return make_uniq<MmcifMetaBindData>(*this);
 	}
 	bool Equals(const FunctionData &other) const override {
 		return false;
@@ -323,12 +309,8 @@ static unique_ptr<FunctionData> MmcifTablesBind(ClientContext &context, TableFun
 		result->rows.push_back({Value(category), Value(dictionary.GetCategoryUrl(category)),
 		                        Value::BIGINT(NumericCast<int64_t>(cat->columns.size()))});
 	}
-	names.emplace_back("table_name");
-	names.emplace_back("comment");
-	names.emplace_back("column_count");
-	return_types.push_back(LogicalType::VARCHAR);
-	return_types.push_back(LogicalType::VARCHAR);
-	return_types.push_back(LogicalType::BIGINT);
+	names = {"table_name", "comment", "column_count"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT};
 	return std::move(result);
 }
 
@@ -354,16 +336,9 @@ static unique_ptr<FunctionData> MmcifColumnsBind(ClientContext &context, TableFu
 			result->rows.push_back(std::move(row));
 		}
 	}
-	names.emplace_back("table_name");
-	names.emplace_back("column_name");
-	names.emplace_back("column_index");
-	names.emplace_back("comment");
-	names.emplace_back("data_type");
-	return_types.push_back(LogicalType::VARCHAR);
-	return_types.push_back(LogicalType::VARCHAR);
-	return_types.push_back(LogicalType::INTEGER);
-	return_types.push_back(LogicalType::VARCHAR);
-	return_types.push_back(LogicalType::VARCHAR);
+	names = {"table_name", "column_name", "column_index", "comment", "data_type"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::INTEGER, LogicalType::VARCHAR,
+	                LogicalType::VARCHAR};
 	return std::move(result);
 }
 
@@ -393,14 +368,8 @@ static unique_ptr<FunctionData> MmcifRelationshipsBind(ClientContext &context, T
 			result->rows.push_back(std::move(row));
 		}
 	}
-	names.emplace_back("parent_table");
-	names.emplace_back("parent_column");
-	names.emplace_back("child_table");
-	names.emplace_back("child_column");
-	return_types.push_back(LogicalType::VARCHAR);
-	return_types.push_back(LogicalType::VARCHAR);
-	return_types.push_back(LogicalType::VARCHAR);
-	return_types.push_back(LogicalType::VARCHAR);
+	names = {"parent_table", "parent_column", "child_table", "child_column"};
+	return_types = vector<LogicalType>(4, LogicalType::VARCHAR);
 	return std::move(result);
 }
 

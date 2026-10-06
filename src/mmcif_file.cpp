@@ -84,35 +84,19 @@ void MmcifFile::Persist(const MmcifWriteStore &store, const string &path, Client
 	string content = MmcifPatch::Apply(store);
 	// Write to a temp file in the same directory, then rename over the target:
 	// each file's write-back is atomic (a crash or failed write leaves the old
-	// file intact, never a truncated .cif). Errors are surfaced (the old
-	// std::ofstream path silently dropped writes when open/IO failed).
+	// file intact, never a truncated .cif).
 	const string tmp_path = path + ".tmp";
 	try {
+		FileOpenFlags flags = FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW;
 		if (StringUtil::EndsWith(StringUtil::Lower(path), ".gz")) {
-			// The store renders plain text; run it through DuckDB's gzip
-			// compression stream so the .cif.gz round-trips correctly.
-			FileOpenFlags flags = FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW;
 			flags.SetCompression(FileCompressionType::GZIP);
-			auto handle = fs.OpenFile(tmp_path, flags);
-			if (!content.empty()) {
-				fs.Write(*handle, data_ptr_cast(&content[0]), content.size());
-			}
-			// Closing the handle flushes the gzip footer (deflate stream end).
-			handle->Close();
-		} else {
-			// binary: without it Windows text mode translates every '\n' to
-			// '\r\n', so the write-back would add carriage returns to the .cif.
-			std::ofstream ofs(tmp_path.c_str(), std::ios::out | std::ios::trunc | std::ios::binary);
-			if (!ofs) {
-				throw IOException("mmcif: cannot open '%s' for writing", tmp_path.c_str());
-			}
-			ofs.write(content.data(), static_cast<std::streamsize>(content.size()));
-			ofs.flush();
-			if (!ofs) {
-				throw IOException("mmcif: failed writing '%s'", tmp_path.c_str());
-			}
-			ofs.close();
 		}
+		auto handle = fs.OpenFile(tmp_path, flags);
+		if (!content.empty()) {
+			fs.Write(*handle, data_ptr_cast(&content[0]), content.size());
+		}
+		// Closing the handle flushes the gzip footer (deflate stream end).
+		handle->Close();
 		// Atomic move over the target (rename). fs.MoveFile is the ACID rename
 		// the storage manager relies on.
 		fs.MoveFile(tmp_path, path);

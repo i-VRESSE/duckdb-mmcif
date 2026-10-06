@@ -205,7 +205,7 @@ public:
 	// Enumerate all category names.
 	void GetCategoryNames(vector<string> &names);
 
-	// Exact row count for a category, computed lazily once (thread-safe) by
+	// Exact row count for a category, computed lazily once by
 	// value-scanning the loop range without materializing strings.
 	idx_t GetRowCount(MmcifCategory &cat);
 
@@ -232,7 +232,6 @@ private:
 
 	string data_block_name;
 	vector<unique_ptr<MmcifCategory>> categories;
-	mutex row_count_lock;
 };
 
 } // namespace duckdb

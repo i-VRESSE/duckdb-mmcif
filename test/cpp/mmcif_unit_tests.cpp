@@ -26,6 +26,17 @@ using namespace duckdb;
 
 namespace {
 
+// Column index by name, so UpdateCell call sites stay readable.
+idx_t Col(const MmcifWriteCategory &cat, const std::string &name) {
+	for (idx_t i = 0; i < cat.columns.size(); i++) {
+		if (cat.columns[i] == name) {
+			return i;
+		}
+	}
+	FAIL("no column " << name);
+	return 0;
+}
+
 // Writes a fixture file into a dedicated temp directory and removes it on scope
 // exit. MmcifIndex::Load(path, nullptr) reads local files via std::ifstream, so
 // no ClientContext / attached database is required to exercise the parser.
@@ -341,7 +352,7 @@ TEST_CASE("MmcifWriteStore add / update / delete / find", "[mmcif][store]") {
 	store.AddRow(*f, {"4", "w"});
 	REQUIRE(f->rows.size() == 4);
 
-	store.UpdateCell(*f, 2, "b", "zz");
+	store.UpdateCell(*f, 2, Col(*f, "b"), "zz");
 	REQUIRE(f->rows[2][1] == "zz");
 
 	// rows sorted + de-duplicated, applied once against the original table
@@ -399,7 +410,7 @@ TEST_CASE("MmcifPatch changes only the bytes of the updated value", "[mmcif][pat
 	auto *cat = store->FindCategory("atom");
 	REQUIRE(cat != nullptr);
 
-	store->UpdateCell(*cat, 0, "name", "ALPHA");
+	store->UpdateCell(*cat, 0, Col(*cat, "name"), "ALPHA");
 	std::string expected = "# top comment\n"
 	                       "data_test\n"
 	                       "#\n"
@@ -527,7 +538,7 @@ TEST_CASE("MmcifPatch opens a text field in column 1", "[mmcif][patch]") {
 
 	// A multi-line value cannot stay on the row's line: the ';...' block has to
 	// start at column 1, so the row breaks first.
-	store->UpdateCell(*cat, 0, "name", "line one\nline two");
+	store->UpdateCell(*cat, 0, Col(*cat, "name"), "line one\nline two");
 	std::string expected = "# top comment\n"
 	                       "data_test\n"
 	                       "#\n"
@@ -551,7 +562,7 @@ TEST_CASE("MmcifPatch ends the line after a text field's closing ';'", "[mmcif][
 	REQUIRE(cat != nullptr);
 
 	// Updated mid-row: the rest of the source row moves to the next line.
-	store->UpdateCell(*cat, 0, "y", "both ' and \"");
+	store->UpdateCell(*cat, 0, Col(*cat, "y"), "both ' and \"");
 	// Inserted row: values after the text field start a new line too.
 	store->AddRow(*cat, {"3", "x\ny", "4"});
 	REQUIRE(MmcifPatch::Apply(*store) == head + "1 \n;both ' and \"\n;\n 2\n3\n;x\ny\n;\n4\n");
@@ -563,8 +574,8 @@ TEST_CASE("MmcifPatch quotes values with embedded quotes", "[mmcif][patch]") {
 	auto *cat = store->FindCategory("atom");
 	REQUIRE(cat != nullptr);
 
-	store->UpdateCell(*cat, 0, "name", "H5'1");
-	store->UpdateCell(*cat, 1, "name", "a\"b");
+	store->UpdateCell(*cat, 0, Col(*cat, "name"), "H5'1");
+	store->UpdateCell(*cat, 1, Col(*cat, "name"), "a\"b");
 	auto out = MmcifPatch::Apply(*store);
 	REQUIRE(out.find("1 \"H5'1\"\n") != std::string::npos);
 	REQUIRE(out.find("2 'a\"b'\n") != std::string::npos);
@@ -588,7 +599,7 @@ TEST_CASE("MmcifPatch keeps extra data blocks and save frames verbatim", "[mmcif
 	auto *cat = store->FindCategory("a");
 	REQUIRE(cat != nullptr);
 
-	store->UpdateCell(*cat, 0, "v", "ONE");
+	store->UpdateCell(*cat, 0, Col(*cat, "v"), "ONE");
 	std::string expected = "# preamble\n"
 	                       "data_FIRST\n"
 	                       "#\n"
@@ -610,7 +621,7 @@ TEST_CASE("MmcifPatch refuses a value it cannot represent", "[mmcif][patch]") {
 	REQUIRE(cat != nullptr);
 
 	// A text field cannot contain a line starting with ';'.
-	store->UpdateCell(*cat, 0, "name", "ok\n;not ok");
+	store->UpdateCell(*cat, 0, Col(*cat, "name"), "ok\n;not ok");
 	REQUIRE_THROWS_AS(MmcifPatch::Apply(*store), IOException);
 }
 
@@ -628,13 +639,13 @@ TEST_CASE("MmcifPatch keeps a CRLF file's line ending convention", "[mmcif][patc
 	REQUIRE(cat != nullptr);
 
 	// A plain update leaves every line ending alone.
-	store->UpdateCell(*cat, 0, "name", "ALPHA");
+	store->UpdateCell(*cat, 0, Col(*cat, "name"), "ALPHA");
 	REQUIRE(MmcifPatch::Apply(*store) == std::string("# top comment\r\ndata_test\r\nloop_\r\n_atom.id\r\n_atom.name\r\n"
 	                                                 "1 ALPHA\r\n"
 	                                                 "2 beta\r\n"));
 
 	// A value that needs a text field breaks the line with CRLF, not LF.
-	store->UpdateCell(*cat, 1, "name", "both 'quotes' and \"quotes\"");
+	store->UpdateCell(*cat, 1, Col(*cat, "name"), "both 'quotes' and \"quotes\"");
 	REQUIRE(MmcifPatch::Apply(*store) == std::string("# top comment\r\ndata_test\r\nloop_\r\n_atom.id\r\n_atom.name\r\n"
 	                                                 "1 ALPHA\r\n"
 	                                                 "2 \r\n"
