@@ -1,7 +1,5 @@
-// mmcif lazy index + streaming scanner (big-pdb-too-slow.md, recommendations 4 & 5).
-//
-// Replaces the RCSB flex/bison parse path for READ-ONLY mmcif files with a
-// hand-written streaming mmCIF scanner and a two-pass lazy index:
+// mmcif lazy index + streaming scanner: a hand-written streaming mmCIF
+// scanner and a two-pass lazy index:
 //
 //   Pass 1 (index): scan the whole decompressed buffer once, line by line,
 //   recording each category's columns and the byte ranges of its loop data.

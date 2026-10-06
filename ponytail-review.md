@@ -50,7 +50,7 @@ Delete:
 
 A write-mode attach passes `nullptr` as the context (`MmcifCatalog` constructor), so it goes through the `ifstream` fallback in `MmcifFile::Read`, which returns empty content for a missing file. If that reading is right, `ATTACH 'missing.cif' (READ_WRITE TRUE)` succeeds with an empty database instead of failing. `MmcifAttach` has a context available, so it could pass it to the catalog. Worth testing before relying on it.
 
-## 5. Comment cleanup
+## 5. Comment cleanup — DONE
 
 - Many header comments refer to things no longer in the repo: "RCSB", "recommendation 4 & 5", "issue 03", "D3/D5/D6", `big-pdb-too-slow.md`, `.scratch/mmcif-extension/map.md`.
 - [CMakeLists.txt](CMakeLists.txt) still has the template text "Feel free to remove…".

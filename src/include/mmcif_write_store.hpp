@@ -1,8 +1,6 @@
 // mmcif write model: the no-deps mutable write store.
 //
-// Evicted from the read-index header (the read path never references it).
-// Write mode keeps one persistent MmcifWriteStore per attached catalog instead
-// of the RCSB CifFile/ISTable core. Cells are materialized (row-major
+// Write mode keeps one persistent MmcifWriteStore per attached catalog. Cells are materialized (row-major
 // vector<string>) so DML can mutate in place; MmcifPatch splices the changes
 // back into the source text. Null cells are stored as "." / "?"; "" maps to
 // "?" on write-back.

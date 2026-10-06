@@ -121,7 +121,7 @@ static unique_ptr<GlobalTableFunctionState> MmcifInitGlobal(ClientContext &conte
 	return make_uniq<MmcifGlobalState>(bind, input.column_ids);
 }
 
-// Index-backed scan (recommendation 3/5/6): parse the category's loop range
+// Index-backed scan: parse the category's loop range
 // incrementally from the byte cursor, row-major, into per-column VARCHAR
 // vectors, then vectorized-cast each column to its dictionary type. LIMIT
 // pushdown falls out naturally: we stop after the requested rows are filled.
@@ -254,7 +254,7 @@ TableFunction MmcifScanFunction() {
 }
 
 // ---------------------------------------------------------------------------
-// Metadata table functions (global, issue 02): mmcif_tables(file),
+// Metadata table functions (global): mmcif_tables(file),
 // mmcif_columns(file), and mmcif_relationships(file), filtered to categories
 // present in the file.
 // ---------------------------------------------------------------------------

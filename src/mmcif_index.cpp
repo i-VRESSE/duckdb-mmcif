@@ -17,7 +17,7 @@
 namespace duckdb {
 
 // ---------------------------------------------------------------------------
-// Process-level cache (recommendation 2): keyed by path, re-attaching the same
+// Process-level cache: keyed by path, re-attaching the same
 // file in one DuckDB session reuses the decompressed content and the pass-1
 // index. Local files are invalidated when their stamp (see MmcifFileStamp)
 // changes; remote paths are cached by path only (may be stale).
@@ -110,8 +110,8 @@ shared_ptr<MmcifIndex> MmcifIndex::Load(const string &path, optional_ptr<ClientC
 	if (GZipFileSystem::CheckIsZip(text.data(), text.size())) {
 		text = GZipFileSystem::UncompressGZIPString(text);
 	}
-	// Append a dummy trailing data block so the parser's "last loop" is flushed
-	// (same trick the RCSB path used); the index keeps only the FIRST data block.
+	// Append a dummy trailing data block so the parser's "last loop" is flushed;
+	// the index keeps only the FIRST data block.
 	idx_t original_text_size = text.size();
 	text += "\ndata_zzz_prototype\n#\n";
 

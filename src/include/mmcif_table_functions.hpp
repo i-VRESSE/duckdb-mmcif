@@ -27,12 +27,12 @@ struct MmcifBindData : public FunctionData {
 	string table_name;
 	std::vector<string> column_names;
 	std::vector<LogicalType> column_types;
-	// Read-only path (recommendation 3/5): a shared lazy index + category. Rows
+	// Read-only path: a shared lazy index + category. Rows
 	// are streamed from the byte cursor in MmcifScan; nothing is materialized at
 	// bind, so LIMIT 10 never copies 2.44M rows.
 	shared_ptr<MmcifIndex> index;
 	MmcifCategory *category = nullptr;
-	// Write-mode (legacy) path: materialized RCSB rows.
+	// Write-mode path: materialized write-store rows.
 	std::vector<std::vector<string>> rows;
 	optional_ptr<TableCatalogEntry> table_entry; // set only for attached-table scans
 
@@ -40,7 +40,7 @@ struct MmcifBindData : public FunctionData {
 	bool Equals(const FunctionData &other) const override;
 
 	static bool IsNullCell(const string &v) {
-		// A cell is NULL when it is empty, ".", or "?" (the RCSB stored forms).
+		// A cell is NULL when it is empty, ".", or "?" (the stored null forms).
 		return v.empty() || v == "." || v == "?";
 	}
 };

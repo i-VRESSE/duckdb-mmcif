@@ -201,7 +201,7 @@ SELECT * FROM nonexistent_table;
 Catalog Error: Table with name nonexistent_table does not exist!
 
 # ---------------------------------------------------------------------------
-# Write mode (issue 01/02): ATTACH ... (READ_WRITE TRUE) enables row-level
+# Write mode: ATTACH ... (READ_WRITE TRUE) enables row-level
 # INSERT/UPDATE/DELETE, with write-back on COMMIT and ROLLBACK discarding.
 # ---------------------------------------------------------------------------
 

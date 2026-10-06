@@ -13,8 +13,7 @@
 
 namespace duckdb {
 
-// Decode one raw cell span into the stored cell string, matching the RCSB
-// parser's stored forms (so write-back is byte-identical):
+// Decode one raw cell span into the stored cell string:
 //   - "." / "?"  -> stored literally (null markers)
 //   - 'x' / "x"  -> quotes stripped, interior kept (doubled quotes preserved)
 //   - ";...;"    -> multi-line text, leading ';' and trailing ';'/ws stripped,

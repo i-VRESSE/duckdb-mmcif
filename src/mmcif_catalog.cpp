@@ -2,7 +2,7 @@
 // Catalog, the write-mode DML operators, the transaction manager, and the
 // storage-extension registration.
 //
-// Write-mode DML operators (D3): custom physical sinks that read the input
+// Write-mode DML operators: custom physical sinks that read the input
 // chunk and apply row-level mutations to the catalog's persistent write store.
 // row_id == physical store row index (scans emit row_id = row index).
 
@@ -49,7 +49,7 @@ static string MmcifCellToString(const Vector &vec, idx_t row) {
 }
 
 // ---------------------------------------------------------------------------
-// Write-mode DML operators (D3)
+// Write-mode DML operators
 // ---------------------------------------------------------------------------
 
 struct MmcifWriteGlobalState : public GlobalSinkState {
@@ -270,7 +270,7 @@ MmcifTableEntry::MmcifTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, C
 unique_ptr<BaseStatistics> MmcifTableEntry::GetStatistics(ClientContext &context, column_t column_id) {
 	// Real min/max stats require a full category scan, which we deliberately
 	// avoid to keep LIMIT/schema queries cheap. Stats are skipped; the planner
-	// still gets exact cardinality from GetStorageInfo (recommendation 7).
+	// still gets exact cardinality from GetStorageInfo.
 	return nullptr;
 }
 
@@ -658,7 +658,7 @@ Transaction &MmcifTransactionManager::StartTransaction(ClientContext &context) {
 }
 
 ErrorData MmcifTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction) {
-	// D5: write the mutated in-memory write store back to the attached .cif on COMMIT.
+	// Write the mutated in-memory write store back to the attached .cif on COMMIT.
 	catalog.Persist(context);
 	lock_guard<mutex> l(lock);
 	transactions.erase(transaction);
@@ -666,9 +666,8 @@ ErrorData MmcifTransactionManager::CommitTransaction(ClientContext &context, Tra
 }
 
 void MmcifTransactionManager::RollbackTransaction(Transaction &transaction) {
-	// D6: ROLLBACK discards in-memory mutations by re-parsing from disk. The
-	// transaction holds a weak ref to the ClientContext, which lets the index
-	// cache's staleness check run (it is skipped for context-free loads).
+	// ROLLBACK discards in-memory mutations by re-parsing from disk, via the
+	// transaction's ClientContext (DuckDB's file system) when it is still alive.
 	auto ctx = transaction.context.lock();
 	catalog.ReloadFromDisk(ctx.get());
 	lock_guard<mutex> l(lock);
@@ -686,7 +685,7 @@ void MmcifTransactionManager::Checkpoint(ClientContext &context, bool force) {
 // Attach + storage-extension registration
 // ---------------------------------------------------------------------------
 
-// D1: enter write mode only when the user explicitly passes a read-write access
+// Enter write mode only when the user explicitly passes a read-write access
 // key (READ_WRITE TRUE). Read-only is the default even though DuckDB core's
 // own default access_mode is READ_WRITE. info.options is the raw pre-consumption
 // map, so the extension can see the explicit keys DuckDB core already consumed.

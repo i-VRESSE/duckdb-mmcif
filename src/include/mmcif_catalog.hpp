@@ -122,11 +122,11 @@ public:
 
 	string path;
 	bool write_mode;
-	// No-deps mutable write store (replaces the RCSB CifFile/ISTable core).
+	// Mutable write store (write mode only).
 	shared_ptr<MmcifWriteStore> write_store;
-	// Read-only lazy index (recommendation 1): built on first resolve, then
+	// Read-only lazy index: built on first resolve, then
 	// reused for every schema lookup, scan, and metadata query in this catalog.
-	// The process-level content cache (recommendation 2) lives in MmcifIndex::Load.
+	// The process-level content cache lives in MmcifIndex::Load.
 	shared_ptr<MmcifIndex> index;
 	mutex index_lock;
 
