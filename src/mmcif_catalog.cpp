@@ -3,7 +3,7 @@
 // storage-extension registration.
 //
 // Write-mode DML operators: custom physical sinks that read the input
-// chunk and apply row-level mutations to the catalog's persistent write store.
+// chunk and apply row-level mutations to the transaction's private write store.
 // row_id == physical store row index (scans emit row_id = row index).
 
 #include "mmcif_catalog.hpp"
@@ -120,8 +120,8 @@ public:
 
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override {
 		auto &gstate = input.global_state.Cast<MmcifWriteGlobalState>();
-		auto &store = catalog.write_store;
-		auto cat = MmcifGetWriteCategory(*store, table_name);
+		auto &store = catalog.WriteStore(context.client);
+		auto cat = MmcifGetWriteCategory(store, table_name);
 		idx_t num_cols = cat->columns.size();
 		chunk.Flatten();
 		for (idx_t r = 0; r < chunk.size(); r++) {
@@ -137,7 +137,7 @@ public:
 				}
 				row[c] = MmcifCellToString(chunk.data[mapped], r, *cat, c);
 			}
-			store->AddRow(*cat, row);
+			store.AddRow(*cat, row);
 			gstate.count++;
 		}
 		return SinkResultType::NEED_MORE_INPUT;
@@ -172,9 +172,9 @@ public:
 		sort(indices.begin(), indices.end());
 		indices.erase(unique(indices.begin(), indices.end()), indices.end());
 		if (!indices.empty()) {
-			auto &store = catalog.write_store;
-			auto cat = MmcifGetWriteCategory(*store, table_name);
-			store->DeleteRows(*cat, indices);
+			auto &store = catalog.WriteStore(context.client);
+			auto cat = MmcifGetWriteCategory(store, table_name);
+			store.DeleteRows(*cat, indices);
 			gstate.count += indices.size();
 		}
 		return SinkCombineResultType::FINISHED;
@@ -195,15 +195,15 @@ public:
 
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override {
 		auto &gstate = input.global_state.Cast<MmcifWriteGlobalState>();
-		auto &store = catalog.write_store;
-		auto cat = MmcifGetWriteCategory(*store, table_name);
+		auto &store = catalog.WriteStore(context.client);
+		auto cat = MmcifGetWriteCategory(store, table_name);
 		chunk.Flatten();
 		auto &row_ids = chunk.data[chunk.ColumnCount() - 1];
 		auto row_data = FlatVector::GetData<int64_t>(row_ids);
 		for (idx_t r = 0; r < chunk.size(); r++) {
 			for (idx_t i = 0; i < columns.size(); i++) {
-				store->UpdateCell(*cat, NumericCast<idx_t>(row_data[r]), columns[i],
-				                  MmcifCellToString(chunk.data[expr_indices[i]], r, *cat, columns[i]));
+				store.UpdateCell(*cat, NumericCast<idx_t>(row_data[r]), columns[i],
+				                 MmcifCellToString(chunk.data[expr_indices[i]], r, *cat, columns[i]));
 			}
 		}
 		gstate.count += chunk.size();
@@ -232,8 +232,8 @@ TableFunction MmcifTableEntry::GetScanFunction(ClientContext &context, unique_pt
 	result->table_entry = this;
 
 	if (catalog->write_mode) {
-		// Write mode: materialized store rows (DML mutates the persistent store).
-		auto &store = catalog->write_store;
+		// Write mode: the transaction's materialized store rows.
+		auto store = catalog->ReadStore(context);
 		auto cat = MmcifGetWriteCategory(*store, table_name);
 		result->column_names = cat->columns;
 		result->store = store;
@@ -262,7 +262,7 @@ TableFunction MmcifTableEntry::GetScanFunction(ClientContext &context, unique_pt
 TableStorageInfo MmcifTableEntry::GetStorageInfo(ClientContext &context) {
 	TableStorageInfo result;
 	if (catalog->write_mode) {
-		auto cat = catalog->write_store->FindCategory(table_name);
+		auto cat = catalog->ReadStore(context)->FindCategory(table_name);
 		result.cardinality = cat ? cat->rows.size() : 0;
 	} else {
 		auto index = catalog->GetIndex(&context);
@@ -360,12 +360,7 @@ void MmcifSchemaEntry::Scan(ClientContext &context, CatalogType type,
 	if (type != CatalogType::TABLE_ENTRY) {
 		return; // mmcif exposes only tables
 	}
-	vector<string> categories;
-	if (catalog->write_mode) {
-		categories = catalog->write_store->GetCategoryNames();
-	} else {
-		categories = catalog->GetIndex(&context)->GetCategoryNames();
-	}
+	auto categories = catalog->GetIndex(&context)->GetCategoryNames();
 	auto transaction = GetCatalogTransaction(context);
 	for (auto &category : categories) {
 		callback(GetTableEntry(transaction, category));
@@ -398,23 +393,17 @@ optional_ptr<CatalogEntry> MmcifSchemaEntry::LookupEntry(CatalogTransaction tran
 MmcifCatalog::MmcifCatalog(AttachedDatabase &db_p, string path_p, bool write_mode_p, ClientContext &context)
     : Catalog(db_p), path(std::move(path_p)), write_mode(write_mode_p) {
 	if (write_mode) {
-		write_store = MmcifIndex::Load(path, &context)->Materialize();
+		index = MmcifIndex::Load(path, &context);
+		write_store = index->Materialize();
 	}
 }
 
 const std::vector<string> *MmcifCatalog::FindColumns(optional_ptr<ClientContext> context, const string &table_name) {
-	if (write_mode) {
-		auto cat = write_store->FindCategory(table_name);
-		return cat ? &cat->columns : nullptr;
-	}
 	auto cat = GetIndex(context)->FindCategory(table_name);
 	return cat ? &cat->columns : nullptr;
 }
 
 shared_ptr<MmcifIndex> MmcifCatalog::GetIndex(optional_ptr<ClientContext> context) {
-	if (write_mode) {
-		return nullptr;
-	}
 	lock_guard<mutex> l(index_lock);
 	if (!index) {
 		index = MmcifIndex::Load(path, context);
@@ -422,32 +411,30 @@ shared_ptr<MmcifIndex> MmcifCatalog::GetIndex(optional_ptr<ClientContext> contex
 	return index;
 }
 
-void MmcifCatalog::ReloadFromDisk(optional_ptr<ClientContext> context) {
-	if (!write_mode || !write_store->IsDirty()) {
-		return; // nothing to discard
-	}
-	write_store = MmcifIndex::Load(path, context)->Materialize();
+shared_ptr<MmcifWriteStore> MmcifCatalog::ReadStore(ClientContext &context) {
+	return Transaction::Get(context, *this).Cast<MmcifTransaction>().store;
 }
 
-void MmcifCatalog::Persist(ClientContext &context) {
-	if (!write_mode || !write_store) {
-		return;
+MmcifWriteStore &MmcifCatalog::WriteStore(ClientContext &context) {
+	auto &transaction = Transaction::Get(context, *this).Cast<MmcifTransaction>();
+	if (transaction.store == transaction.snapshot) {
+		{
+			lock_guard<mutex> l(write_lock);
+			if (write_store != transaction.snapshot) {
+				throw TransactionException("mmcif: write-write conflict on '%s' - another transaction committed first",
+				                           path);
+			}
+		}
+		// ponytail: copies the whole store once per writing transaction (same O(file)
+		// as the write-back); copy only touched categories if this shows in profiles.
+		transaction.store = make_shared_ptr<MmcifWriteStore>(*transaction.snapshot);
 	}
-	if (!write_store->IsDirty()) {
-		// Read-only / no-op transactions never rewrite the file.
-		return;
-	}
-	MmcifFile::Persist(*write_store, path, context);
-	write_store->ClearDirty();
+	return *transaction.store;
 }
 
 void MmcifCatalog::Initialize(bool load_builtin) {
 	CreateSchemaInfo info;
 	main_schema = make_uniq<MmcifSchemaEntry>(*this, info, this);
-}
-
-void MmcifCatalog::OnDetach(ClientContext &context) {
-	Persist(context);
 }
 
 string MmcifCatalog::GetCatalogType() {
@@ -574,7 +561,12 @@ MmcifTransactionManager::MmcifTransactionManager(AttachedDatabase &db, MmcifCata
 }
 
 Transaction &MmcifTransactionManager::StartTransaction(ClientContext &context) {
-	auto transaction = make_uniq<Transaction>(*this, context);
+	shared_ptr<MmcifWriteStore> snapshot;
+	{
+		lock_guard<mutex> l(catalog.write_lock);
+		snapshot = catalog.write_store;
+	}
+	auto transaction = make_uniq<MmcifTransaction>(*this, context, std::move(snapshot));
 	auto &result = *transaction;
 	lock_guard<mutex> l(lock);
 	transactions[result] = std::move(transaction);
@@ -582,18 +574,31 @@ Transaction &MmcifTransactionManager::StartTransaction(ClientContext &context) {
 }
 
 ErrorData MmcifTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction) {
-	// Write the mutated in-memory write store back to the attached .cif on COMMIT.
-	catalog.Persist(context);
+	auto &mmcif_transaction = transaction.Cast<MmcifTransaction>();
+	ErrorData error;
+	auto &store = mmcif_transaction.store;
+	// Read-only / no-op transactions never rewrite the file.
+	if (store != mmcif_transaction.snapshot && store->IsDirty()) {
+		lock_guard<mutex> l(catalog.write_lock);
+		try {
+			if (catalog.write_store != mmcif_transaction.snapshot) {
+				throw TransactionException("mmcif: write-write conflict on '%s' - another transaction committed first",
+				                           catalog.path);
+			}
+			MmcifFile::Persist(*store, catalog.path, context);
+			store->ClearDirty();
+			catalog.write_store = store;
+		} catch (std::exception &ex) {
+			error = ErrorData(ex);
+		}
+	}
 	lock_guard<mutex> l(lock);
 	transactions.erase(transaction);
-	return ErrorData();
+	return error;
 }
 
 void MmcifTransactionManager::RollbackTransaction(Transaction &transaction) {
-	// ROLLBACK discards in-memory mutations by re-parsing from disk, via the
-	// transaction's ClientContext (DuckDB's file system) when it is still alive.
-	auto ctx = transaction.context.lock();
-	catalog.ReloadFromDisk(ctx.get());
+	// The private store dies with the transaction; the committed store is untouched.
 	lock_guard<mutex> l(lock);
 	transactions.erase(transaction);
 }
@@ -602,7 +607,7 @@ void MmcifTransactionManager::Checkpoint(ClientContext &context, bool force) {
 	if (!catalog.write_mode) {
 		throw NotImplementedException("Cannot CHECKPOINT a read-only mmcif database");
 	}
-	catalog.Persist(context);
+	// Nothing to do: COMMIT already wrote every committed change to disk.
 }
 
 // ---------------------------------------------------------------------------

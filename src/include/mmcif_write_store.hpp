@@ -1,6 +1,7 @@
 // mmcif write model: the no-deps mutable write store.
 //
-// Write mode keeps one persistent MmcifWriteStore per attached catalog. Cells are materialized (row-major
+// Write mode keeps the committed MmcifWriteStore per attached catalog; a
+// writing transaction mutates its own copy. Cells are materialized (row-major
 // vector<string>) so DML can mutate in place; MmcifPatch splices the changes
 // back into the source text. Null cells are stored as "." / "?"; "" maps to
 // "?" on write-back.
@@ -86,7 +87,7 @@ public:
 	void DeleteRows(MmcifWriteCategory &cat, const std::vector<idx_t> &rows);
 	void UpdateCell(MmcifWriteCategory &cat, idx_t row, idx_t col, const string &value);
 
-	// COMMIT/detach/checkpoint write the store back to disk only when it is
+	// COMMIT writes the store back to disk only when it is
 	// dirty (some DML mutated it since materialization). Read-only transactions
 	// therefore never rewrite the file.
 	bool IsDirty() const {

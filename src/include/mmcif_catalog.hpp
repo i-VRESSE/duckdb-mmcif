@@ -2,10 +2,10 @@
 // schema (MmcifSchemaEntry), per-category table entries (MmcifTableEntry),
 // and a write-mode transaction manager (MmcifTransactionManager).
 //
-// Read-only by default; opened with READ_WRITE TRUE the catalog owns one
-// persistent MmcifWriteStore that DML operators mutate and COMMIT/detach
-// write back (MmcifFile::Persist). The DML operators themselves live in
-// mmcif_catalog.cpp.
+// Read-only by default; opened with READ_WRITE TRUE every transaction reads a
+// snapshot of the committed MmcifWriteStore and its first DML copies it into a
+// private store, which COMMIT writes back (MmcifFile::Persist) and publishes.
+// The DML operators themselves live in mmcif_catalog.cpp.
 
 #pragma once
 
@@ -101,8 +101,8 @@ public:
 
 // ---------------------------------------------------------------------------
 // MmcifCatalog: SQLite-style custom Catalog. Single "main" schema. Read-only
-// by default; opened with READ_WRITE TRUE it owns one persistent
-// MmcifWriteStore that DML operators mutate and COMMIT/detach write back.
+// by default; opened with READ_WRITE TRUE it holds the committed
+// MmcifWriteStore, which transactions snapshot and replace on COMMIT.
 // ---------------------------------------------------------------------------
 
 class MmcifCatalog : public Catalog {
@@ -111,25 +111,25 @@ public:
 
 	string path;
 	bool write_mode;
-	// Mutable write store (write mode only).
+	// Last committed write store (write mode only); guarded by write_lock.
 	shared_ptr<MmcifWriteStore> write_store;
-	// Read-only lazy index: built on first resolve, then
-	// reused for every schema lookup, scan, and metadata query in this catalog.
+	mutex write_lock;
+	// Lazy index: built on first resolve (at attach in write mode), then reused
+	// for every schema lookup, scan, and metadata query in this catalog. DML
+	// never changes columns, so write mode resolves tables through it too.
 	// The process-level content cache lives in MmcifIndex::Load.
 	shared_ptr<MmcifIndex> index;
 	mutex index_lock;
 
 	shared_ptr<MmcifIndex> GetIndex(optional_ptr<ClientContext> context);
-	// Columns of a category in the write store or the index; nullptr if absent.
+	// Columns of a category in the index; nullptr if absent.
 	const std::vector<string> *FindColumns(optional_ptr<ClientContext> context, const string &table_name);
-	// ROLLBACK: discard in-memory mutations by re-materializing from disk.
-	void ReloadFromDisk(optional_ptr<ClientContext> context);
-	// COMMIT / detach / checkpoint: write the in-memory store back to disk
-	// (gzip vs plain vs remote policy lives in MmcifFile::Persist).
-	void Persist(ClientContext &context);
+	// The calling transaction's store: its snapshot, or its private copy once it wrote.
+	shared_ptr<MmcifWriteStore> ReadStore(ClientContext &context);
+	// The calling transaction's private store, copied from its snapshot on first use.
+	MmcifWriteStore &WriteStore(ClientContext &context);
 
 	void Initialize(bool load_builtin) override;
-	void OnDetach(ClientContext &context) override;
 
 	string GetCatalogType() override;
 
@@ -164,8 +164,22 @@ private:
 
 // ---------------------------------------------------------------------------
 // Transaction manager (DuckTransactionManager requires a DuckCatalog). In write
-// mode COMMIT/CHECKPOINT persist the store and ROLLBACK reloads it from disk.
+// mode COMMIT persists the transaction's private store and publishes it;
+// ROLLBACK drops it. A transaction that writes after another one committed
+// fails with a write-write conflict.
 // ---------------------------------------------------------------------------
+
+class MmcifTransaction : public Transaction {
+public:
+	MmcifTransaction(TransactionManager &manager, ClientContext &context, shared_ptr<MmcifWriteStore> snapshot_p)
+	    : Transaction(manager, context), snapshot(snapshot_p), store(std::move(snapshot_p)) {
+	}
+
+	// Committed store when the transaction started.
+	shared_ptr<MmcifWriteStore> snapshot;
+	// == snapshot until the first DML replaces it with a private copy.
+	shared_ptr<MmcifWriteStore> store;
+};
 
 class MmcifTransactionManager : public TransactionManager {
 public:

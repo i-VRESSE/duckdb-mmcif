@@ -302,7 +302,7 @@ SELECT count(*) FROM atom_site;
 statement ok
 COMMIT;
 
-# ROLLBACK discards in-memory mutations by re-parsing from disk
+# ROLLBACK discards the transaction's private copy of the store
 statement ok
 BEGIN;
 
@@ -560,7 +560,7 @@ C1	1.5
 N1	2.5
 O1	3.5
 
-# ROLLBACK re-materializes from disk, comments included
+# ROLLBACK keeps the committed store, comments included
 statement ok
 USE rcdb;
 
@@ -978,3 +978,92 @@ replaced_with_a_long_value	a_long_second_value
 
 statement ok
 DETACH lv;
+
+# ---------------------------------------------------------------------------
+# Each transaction has its own write store: other connections never see, save,
+# or discard its uncommitted changes, and a stale writer gets a conflict.
+# ---------------------------------------------------------------------------
+
+statement ok
+COPY (SELECT concat_ws(chr(10), 'data_t', '_t.v original')) TO '__TEST_DIR__/mmcif_txn.cif' (FORMAT CSV, HEADER 0, QUOTE '');
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_txn.cif' AS tx (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok con1
+BEGIN;
+
+statement ok con1
+UPDATE tx.t SET v = 'from_con1';
+
+query I con2
+SELECT v FROM tx.t;
+----
+original
+
+# con2 commits something unrelated to con1's change: nothing is written
+statement ok con2
+BEGIN;
+
+statement ok con2
+SELECT * FROM tx.t;
+
+statement ok con2
+COMMIT;
+
+query I
+SELECT content LIKE '%original%' FROM read_text('__TEST_DIR__/mmcif_txn.cif');
+----
+true
+
+statement ok con2
+BEGIN;
+
+statement ok con2
+ROLLBACK;
+
+query I con1
+SELECT v FROM tx.t;
+----
+from_con1
+
+# con2 commits first; con1's commit now conflicts and changes nothing
+statement ok con2
+UPDATE tx.t SET v = 'from_con2';
+
+statement error con1
+COMMIT;
+----
+write-write conflict
+
+query I con1
+SELECT v FROM tx.t;
+----
+from_con2
+
+# A transaction whose snapshot is stale fails at its first write
+statement ok con1
+BEGIN;
+
+# the snapshot is taken on first access to tx, not at BEGIN
+statement ok con1
+SELECT * FROM tx.t;
+
+statement ok con2
+UPDATE tx.t SET v = 'again_con2';
+
+statement error con1
+UPDATE tx.t SET v = 'stale';
+----
+write-write conflict
+
+statement ok con1
+ROLLBACK;
+
+query I
+SELECT content LIKE '%again_con2%' FROM read_text('__TEST_DIR__/mmcif_txn.cif');
+----
+true
+
+statement ok
+DETACH tx;

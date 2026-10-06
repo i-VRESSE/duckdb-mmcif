@@ -62,7 +62,7 @@ string MmcifFile::Read(const string &file_name, optional_ptr<ClientContext> cont
 	return ss.str();
 }
 
-// COMMIT / detach / checkpoint: write the in-memory store back to disk.
+// COMMIT: write the transaction's store back to disk.
 // Paths ending in .gz are written back gzip-compressed (the read path
 // auto-decompresses them, so writing plain text would break the round-trip).
 void MmcifFile::Persist(const MmcifWriteStore &store, const string &path, ClientContext &context) {

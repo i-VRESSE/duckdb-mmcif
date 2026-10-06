@@ -30,7 +30,7 @@ public:
 	// missing local file throws either way.
 	static string Read(const string &path, optional_ptr<ClientContext> context);
 
-	// COMMIT / detach / checkpoint: write the in-memory store back to disk.
+	// COMMIT: write the transaction's store back to disk.
 	// Paths ending in .gz are written back gzip-compressed (the read path
 	// auto-decompresses them, so writing plain text would break the
 	// round-trip). Remote paths are rejected (read-only).
