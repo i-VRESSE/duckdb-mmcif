@@ -348,9 +348,7 @@ string MmcifPatch::Apply(const MmcifWriteStore &store) {
 			if (IsInsertedRow(cat, r)) {
 				continue; // generated below, from the current values
 			}
-			if (r >= cat.cell_spans.size() || cat.cell_spans[r].size() != cat.rows[r].size()) {
-				throw InternalException("mmcif: write-back spans are out of sync for category '%s'", cat.name.c_str());
-			}
+			D_ASSERT(cat.cell_spans[r].size() == cat.rows[r].size());
 			for (idx_t c = 0; c < cat.rows[r].size(); c++) {
 				const MmcifCellSpan &span = cat.cell_spans[r][c];
 				if (!span.edited) {

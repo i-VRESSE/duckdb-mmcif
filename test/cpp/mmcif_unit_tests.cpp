@@ -447,7 +447,7 @@ static const char *PATCH_SHARED_SRC = "data_t\n"
                                       "  1 2 3 4\n"
                                       "5 6\n";
 
-static std::string PatchDeleteShared(const std::string &name, const std::vector<unsigned int> &rows) {
+static std::string PatchDeleteShared(const std::string &name, const std::vector<idx_t> &rows) {
 	TempCif cif(name, PATCH_SHARED_SRC);
 	auto store = PatchFixture(cif);
 	auto *cat = store->FindCategory("c");

@@ -83,7 +83,7 @@ public:
 	MmcifWriteCategory *FindCategory(const string &name);
 	std::vector<string> GetCategoryNames() const;
 	void AddRow(MmcifWriteCategory &cat, const std::vector<string> &row);
-	void DeleteRows(MmcifWriteCategory &cat, const std::vector<unsigned int> &rows);
+	void DeleteRows(MmcifWriteCategory &cat, const std::vector<idx_t> &rows);
 	void UpdateCell(MmcifWriteCategory &cat, idx_t row, idx_t col, const string &value);
 
 	// COMMIT/detach/checkpoint write the store back to disk only when it is

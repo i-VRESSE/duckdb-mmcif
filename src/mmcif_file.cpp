@@ -1,5 +1,5 @@
-// File-format policy: remote/gzip/plain reads, the write loader, and the
-// gzip-aware write-back.
+// File-format policy: remote/gzip/plain reads and the gzip-aware
+// write-back.
 
 #include "mmcif_file.hpp"
 
@@ -60,13 +60,6 @@ string MmcifFile::Read(const string &file_name, optional_ptr<ClientContext> cont
 	std::stringstream ss;
 	ss << in.rdbuf();
 	return ss.str();
-}
-
-// Materialize the no-deps mutable write store for a file (gzip'd inputs are
-// decompressed by MmcifIndex::Load before the index is built).
-shared_ptr<MmcifWriteStore> MmcifFile::LoadWriteStore(const string &file_name, optional_ptr<ClientContext> context) {
-	auto index = MmcifIndex::Load(file_name, context);
-	return index->Materialize();
 }
 
 // COMMIT / detach / checkpoint: write the in-memory store back to disk.

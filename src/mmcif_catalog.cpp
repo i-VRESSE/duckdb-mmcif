@@ -60,7 +60,7 @@ struct MmcifWriteGlobalState : public GlobalSinkState {
 	// DELETE row ids are accumulated across sink chunks and applied once in Combine:
 	// row ids refer to positions in the table as it was when the scan started, so
 	// applying them chunk-by-chunk would use stale indices after the first shrink.
-	std::vector<unsigned int> delete_indices;
+	std::vector<idx_t> delete_indices;
 };
 
 // Shared sink/source plumbing: a single-threaded, order-dependent sink that
@@ -161,13 +161,13 @@ public:
 		auto &row_ids = chunk.data[row_id_index];
 		auto row_data = FlatVector::GetData<int64_t>(row_ids);
 		for (idx_t r = 0; r < chunk.size(); r++) {
-			gstate.delete_indices.push_back(NumericCast<unsigned int>(row_data[r]));
+			gstate.delete_indices.push_back(NumericCast<idx_t>(row_data[r]));
 		}
 		return SinkResultType::NEED_MORE_INPUT;
 	}
 	SinkCombineResultType Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const override {
 		auto &gstate = input.global_state.Cast<MmcifWriteGlobalState>();
-		std::vector<unsigned int> indices;
+		std::vector<idx_t> indices;
 		indices.swap(gstate.delete_indices);
 		sort(indices.begin(), indices.end());
 		indices.erase(unique(indices.begin(), indices.end()), indices.end());
@@ -398,7 +398,7 @@ optional_ptr<CatalogEntry> MmcifSchemaEntry::LookupEntry(CatalogTransaction tran
 MmcifCatalog::MmcifCatalog(AttachedDatabase &db_p, string path_p, bool write_mode_p, ClientContext &context)
     : Catalog(db_p), path(std::move(path_p)), write_mode(write_mode_p) {
 	if (write_mode) {
-		write_store = MmcifFile::LoadWriteStore(path, &context);
+		write_store = MmcifIndex::Load(path, &context)->Materialize();
 	}
 }
 
@@ -426,7 +426,7 @@ void MmcifCatalog::ReloadFromDisk(optional_ptr<ClientContext> context) {
 	if (!write_mode) {
 		return;
 	}
-	write_store = MmcifFile::LoadWriteStore(path, context);
+	write_store = MmcifIndex::Load(path, context)->Materialize();
 }
 
 void MmcifCatalog::Persist(ClientContext &context) {

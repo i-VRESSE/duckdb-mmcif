@@ -153,7 +153,7 @@ void MmcifWriteStore::AddRow(MmcifWriteCategory &cat, const std::vector<string> 
 	dirty = true;
 }
 
-void MmcifWriteStore::DeleteRows(MmcifWriteCategory &cat, const std::vector<unsigned int> &rows) {
+void MmcifWriteStore::DeleteRows(MmcifWriteCategory &cat, const std::vector<idx_t> &rows) {
 	// rows is already sorted + de-duplicated by the caller; delete from the end
 	// so indices stay valid.
 	for (idx_t i = rows.size(); i > 0; i--) {

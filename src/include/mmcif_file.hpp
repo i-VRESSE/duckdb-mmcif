@@ -1,5 +1,5 @@
-// File-format policy: remote/gzip/plain reads, the write loader, and the
-// gzip-aware write-back.
+// File-format policy: remote/gzip/plain reads and the gzip-aware
+// write-back.
 
 #pragma once
 
@@ -29,11 +29,6 @@ public:
 	// std::ifstream for callers without a context (always local paths). A
 	// missing local file throws either way.
 	static string Read(const string &path, optional_ptr<ClientContext> context);
-
-	// Materialize the no-deps mutable write store for a file (gzip'd inputs
-	// are decompressed by MmcifIndex::Load before the index is built). The
-	// index->store seam is MmcifIndex::Materialize().
-	static shared_ptr<MmcifWriteStore> LoadWriteStore(const string &path, optional_ptr<ClientContext> context);
 
 	// COMMIT / detach / checkpoint: write the in-memory store back to disk.
 	// Paths ending in .gz are written back gzip-compressed (the read path

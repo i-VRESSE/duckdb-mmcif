@@ -147,33 +147,23 @@ static bool MmcifIsKeyword(const char *base, idx_t start, idx_t len) {
 	       MmcifStartsWith(base, start, end, "global_") || MmcifStartsWith(base, start, end, "stop_");
 }
 
-// Split a "_category.item" tag into (category, item). Returns false for a bare "_".
-static bool MmcifSplitTag(const char *base, idx_t start, idx_t len, string &category, string &item) {
-	if (len < 1 || base[start] != '_') {
-		return false;
+// Split the "_category.item" tag that starts at `start` into (category, item).
+// Returns the offset just past the tag, or 0 when it has no '.'.
+static idx_t MmcifSplitTag(const char *base, idx_t start, idx_t end, string &category, string &item) {
+	idx_t tag_end = start;
+	while (tag_end < end && !isspace(static_cast<unsigned char>(base[tag_end]))) {
+		tag_end++;
 	}
 	idx_t dot = start + 1;
-	while (dot < start + len && base[dot] != '.') {
+	while (dot < tag_end && base[dot] != '.') {
 		dot++;
 	}
-	if (dot == start + len) {
-		return false; // "_category" without item
+	if (dot >= tag_end) {
+		return 0;
 	}
-	category.assign(base + start + 1, dot - (start + 1));
-	// The item runs up to the first whitespace: loop-header tags and single-tag
-	// lines both carry trailing spaces/tabs, and single-tag lines carry a value.
-	idx_t item_start = dot + 1;
-	idx_t item_end = item_start;
-	while (item_end < start + len && !isspace(static_cast<unsigned char>(base[item_end]))) {
-		item_end++;
-	}
-	item.assign(base + item_start, item_end - item_start);
-	// Trim trailing whitespace from category (mmCIF tags often carry trailing
-	// spaces/tabs before the newline).
-	while (!category.empty() && isspace(static_cast<unsigned char>(category.back()))) {
-		category.pop_back();
-	}
-	return true;
+	category.assign(base + start + 1, dot - start - 1);
+	item.assign(base + dot + 1, tag_end - dot - 1);
+	return tag_end;
 }
 
 void MmcifIndex::Build() {
@@ -227,7 +217,8 @@ void MmcifIndex::Build() {
 			} else if (c == '_') {
 				// Tag line.
 				string cat, item;
-				if (!MmcifSplitTag(base, s, line_end - s, cat, item)) {
+				idx_t tag_end = MmcifSplitTag(base, s, line_end, cat, item);
+				if (tag_end == 0) {
 					if (state == LOOP_DATA) {
 						end_loop(line_start);
 					}
@@ -252,10 +243,6 @@ void MmcifIndex::Build() {
 					}
 					MmcifSingleCell cell;
 					cell.col = column_index(item);
-					idx_t tag_end = s;
-					while (tag_end < line_end && !isspace(static_cast<unsigned char>(base[tag_end]))) {
-						tag_end++;
-					}
 					// The value follows the tag on its line or on a later one (wwPDB
 					// writes long values, quoted or as a ';' text field, below the tag).
 					const char *out;
