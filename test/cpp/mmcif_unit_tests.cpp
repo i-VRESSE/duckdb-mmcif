@@ -6,26 +6,36 @@
 // cursor token grammar, the pass-1 index Build() edge cases (comments, the
 // keep-first-data-block rule, multi-line / next-line single-tag values, partial
 // trailing rows), the write-store decode + DML helpers, and the byte-level
-// quoting / text-block / null behaviour of MmcifWriteCif.
+// output of the MmcifPatch write-back.
 
 #define CATCH_CONFIG_MAIN
 #include "catch.hpp"
 
 #include "mmcif_file.hpp"
 #include "mmcif_index.hpp"
+#include "mmcif_patch.hpp"
 #include "mmcif_write_store.hpp"
-#include "mmcif_writer.hpp"
 
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <sstream>
 #include <string>
 #include <vector>
 
 using namespace duckdb;
 
 namespace {
+
+// Column index by name, so UpdateCell call sites stay readable.
+idx_t Col(const MmcifWriteCategory &cat, const std::string &name) {
+	for (idx_t i = 0; i < cat.columns.size(); i++) {
+		if (cat.columns[i] == name) {
+			return i;
+		}
+	}
+	FAIL("no column " << name);
+	return 0;
+}
 
 // Writes a fixture file into a dedicated temp directory and removes it on scope
 // exit. MmcifIndex::Load(path, nullptr) reads local files via std::ifstream, so
@@ -66,12 +76,6 @@ std::string NextValue(MmcifValueCursor &cursor, bool *is_null) {
 	return ReadAll(out, len);
 }
 
-std::string WriteToString(const MmcifWriteStore &store) {
-	std::ostringstream ss;
-	MmcifWriteCif(ss, store);
-	return ss.str();
-}
-
 bool Contains(const std::string &haystack, const std::string &needle) {
 	return haystack.find(needle) != std::string::npos;
 }
@@ -83,19 +87,6 @@ idx_t ColIndex(const MmcifWriteCategory &cat, const std::string &name) {
 		}
 	}
 	return idx_t(-1);
-}
-
-MmcifWriteStore MakeLoopStore(const std::string &block, const std::string &cat_name,
-                              const std::vector<std::string> &cols, std::vector<std::vector<std::string>> rows) {
-	MmcifWriteStore store;
-	store.data_block_name = block;
-	MmcifWriteCategory cat;
-	cat.name = cat_name;
-	cat.is_loop = true;
-	cat.columns = cols;
-	cat.rows = std::move(rows);
-	store.categories.push_back(std::move(cat));
-	return store;
 }
 
 } // namespace
@@ -166,7 +157,9 @@ TEST_CASE("MmcifValueCursor reads ;...; multi-line values", "[mmcif][cursor]") {
 // MmcifIndex::Build / Materialize edge cases
 // ---------------------------------------------------------------------------
 
-TEST_CASE("MmcifIndex indexes loop + single-tag, decodes values, keeps first data block", "[mmcif][index]") {
+TEST_CASE("MmcifIndex indexes loop + single-tag, decodes values, keeps first "
+          "data block",
+          "[mmcif][index]") {
 	std::string cif = "data_testblock\n"
 	                  "loop_\n"
 	                  "_foo.a\n"
@@ -189,9 +182,7 @@ TEST_CASE("MmcifIndex indexes loop + single-tag, decodes values, keeps first dat
 	REQUIRE(index);
 	REQUIRE(index->GetDataBlockName() == "testblock");
 
-	vector<string> names;
-	index->GetCategoryNames(names);
-	REQUIRE(names.size() == 2);
+	REQUIRE(index->GetCategoryNames().size() == 2);
 
 	auto *foo = index->FindCategory("foo");
 	REQUIRE(foo);
@@ -214,14 +205,14 @@ TEST_CASE("MmcifIndex indexes loop + single-tag, decodes values, keeps first dat
 
 	auto *sfoo = store->FindCategory("foo");
 	REQUIRE(sfoo);
-	REQUIRE(store->GetNumRows(*sfoo) == 2);
-	auto row0 = store->GetRow(*sfoo, 0);
+	REQUIRE(sfoo->rows.size() == 2);
+	auto row0 = sfoo->rows[0];
 	REQUIRE(row0[ColIndex(*sfoo, "a")] == "1");
 	REQUIRE(row0[ColIndex(*sfoo, "b")] == "1");
 
 	auto *ssingle = store->FindCategory("single");
 	REQUIRE(ssingle);
-	auto srow = store->GetRow(*ssingle, 0);
+	auto srow = ssingle->rows[0];
 	REQUIRE(srow[ColIndex(*ssingle, "tag1")] == "value1");
 	// next-line ;...; value is decoded with the delimiters + trailing ws stripped
 	REQUIRE(srow[ColIndex(*ssingle, "tag2")] == "a multi\nline value");
@@ -231,14 +222,14 @@ TEST_CASE("MmcifIndex indexes loop + single-tag, decodes values, keeps first dat
 	REQUIRE(srow[ColIndex(*ssingle, "tag4")] == "quoted value");
 }
 
-TEST_CASE("MmcifIndex terminates loop data on a comment line", "[mmcif][index]") {
+TEST_CASE("MmcifIndex keeps loop data that follows a comment line", "[mmcif][index]") {
 	std::string cif = "data_b\n"
 	                  "loop_\n"
 	                  "_c.x\n"
 	                  "1\n"
 	                  "2\n"
-	                  "# comment ends the loop\n"
-	                  "stray top-level line\n";
+	                  "# comment inside the loop\n"
+	                  "3\n";
 	TempCif fixture("idx_comment.cif", cif);
 
 	auto index = MmcifIndex::Load(fixture.Str(), nullptr);
@@ -246,11 +237,32 @@ TEST_CASE("MmcifIndex terminates loop data on a comment line", "[mmcif][index]")
 	auto *c = index->FindCategory("c");
 	REQUIRE(c);
 	REQUIRE(c->is_loop);
-	REQUIRE(index->GetRowCount(*c) == 2);
-	// the stray line after the comment must not become a category
-	vector<string> names;
-	index->GetCategoryNames(names);
-	REQUIRE(names.size() == 1);
+	// A comment sits between values - it does not end the loop, so the row
+	// after it is still loop data (it used to be dropped here).
+	REQUIRE(index->GetRowCount(*c) == 3);
+}
+
+TEST_CASE("MmcifIndex closes loop data before a single-tag category", "[mmcif][index]") {
+	// A loop followed straight by a single-tag line of another category (no
+	// blank or comment between) used to finalize the loop before its data_end
+	// was set, leaving the loop with no data at all.
+	std::string cif = "data_b\n"
+	                  "loop_\n"
+	                  "_a.x\n"
+	                  "1\n"
+	                  "2\n"
+	                  "_b.y 9\n";
+	TempCif fixture("idx_loop_then_single.cif", cif);
+
+	auto index = MmcifIndex::Load(fixture.Str(), nullptr);
+	REQUIRE(index);
+	auto *a = index->FindCategory("a");
+	REQUIRE(a);
+	REQUIRE(index->GetRowCount(*a) == 2);
+	auto *b = index->FindCategory("b");
+	REQUIRE(b);
+	REQUIRE(!b->is_loop);
+	REQUIRE(index->GetRowCount(*b) == 1);
 }
 
 TEST_CASE("MmcifIndex counts and materializes a partial trailing row", "[mmcif][index]") {
@@ -271,10 +283,41 @@ TEST_CASE("MmcifIndex counts and materializes a partial trailing row", "[mmcif][
 	auto store = index->Materialize();
 	auto *sp = store->FindCategory("p");
 	REQUIRE(sp);
-	REQUIRE(store->GetNumRows(*sp) == 2);
-	auto last = store->GetRow(*sp, 1);
+	REQUIRE(sp->rows.size() == 2);
+	auto last = sp->rows[1];
 	REQUIRE(last[ColIndex(*sp, "a")] == "3");
 	REQUIRE(last[ColIndex(*sp, "b")] == "");
+}
+
+TEST_CASE("MmcifIndex::Load detects a same-size rewrite without a context", "[mmcif][index][cache]") {
+	// Write-mode attaches load without a ClientContext. A size-only stamp let a
+	// cached index survive an external rewrite of identical byte length, so the
+	// next write-mode attach materialized stale data.
+	TempCif fixture("idx_same_size_rewrite.cif", "data_b\n_q.a 1\n");
+	auto first = MmcifIndex::Load(fixture.Str(), nullptr);
+	REQUIRE(first);
+	REQUIRE(MmcifIndex::Load(fixture.Str(), nullptr) == first); // unchanged file is served from the cache
+	auto first_store = first->Materialize();
+	auto *q1 = first_store->FindCategory("q");
+	REQUIRE(q1);
+	REQUIRE(q1->rows[0][0] == "1");
+
+	// Rewrite in place with same length and restore the mtime, simulating a
+	// rewrite within the filesystem's mtime granularity.
+	auto original_mtime = std::filesystem::last_write_time(fixture.Str());
+	{
+		std::ofstream ofs(fixture.Str(), std::ios::binary | std::ios::trunc);
+		ofs << "data_b\n_q.a 2\n";
+	}
+	std::filesystem::last_write_time(fixture.Str(), original_mtime);
+
+	auto second = MmcifIndex::Load(fixture.Str(), nullptr);
+	REQUIRE(second);
+	REQUIRE(second != first);
+	auto store = second->Materialize();
+	auto *q2 = store->FindCategory("q");
+	REQUIRE(q2);
+	REQUIRE(q2->rows[0][0] == "2");
 }
 
 TEST_CASE("MmcifIndex::FindCategory returns null for a missing category", "[mmcif][index]") {
@@ -289,14 +332,9 @@ TEST_CASE("MmcifIndex::FindCategory returns null for a missing category", "[mmci
 // ---------------------------------------------------------------------------
 
 TEST_CASE("MmcifWriteStore add / update / delete / find", "[mmcif][store]") {
-	MmcifWriteStore store;
-	store.data_block_name = "t";
-	MmcifWriteCategory cat;
-	cat.name = "foo";
-	cat.is_loop = true;
-	cat.columns = {"a", "b"};
-	cat.rows = {{"1", "x"}, {"2", "y"}, {"3", "z"}};
-	store.categories.push_back(cat);
+	TempCif fixture("store_dml.cif", "data_t\nloop_\n_foo.a\n_foo.b\n1 x\n2 y\n3 z\n");
+	auto store_ptr = MmcifIndex::Load(fixture.Str(), nullptr)->Materialize();
+	auto &store = *store_ptr;
 
 	auto names = store.GetCategoryNames();
 	REQUIRE(names.size() == 1);
@@ -307,125 +345,19 @@ TEST_CASE("MmcifWriteStore add / update / delete / find", "[mmcif][store]") {
 	REQUIRE(store.FindCategory("missing") == nullptr);
 
 	auto *f = store.FindCategory("foo");
-	REQUIRE(store.GetNumRows(*f) == 3);
+	REQUIRE(f->rows.size() == 3);
 
 	store.AddRow(*f, {"4", "w"});
-	REQUIRE(store.GetNumRows(*f) == 4);
+	REQUIRE(f->rows.size() == 4);
 
-	store.UpdateCell(*f, 2, "b", "zz");
-	REQUIRE(store.GetRow(*f, 2)[1] == "zz");
+	store.UpdateCell(*f, 2, Col(*f, "b"), "zz");
+	REQUIRE(f->rows[2][1] == "zz");
 
 	// rows sorted + de-duplicated, applied once against the original table
 	store.DeleteRows(*f, {0, 2});
-	REQUIRE(store.GetNumRows(*f) == 2);
-	REQUIRE(store.GetRow(*f, 0)[0] == "2");
-	REQUIRE(store.GetRow(*f, 1)[0] == "4");
-}
-
-// ---------------------------------------------------------------------------
-// MmcifWriteCif byte format
-// ---------------------------------------------------------------------------
-
-TEST_CASE("MmcifWriteCif emits header, loop header and aligned rows", "[mmcif][writer]") {
-	auto store = MakeLoopStore("block1", "foo", {"a", "b"}, {{"1", "x"}, {"2", "y"}});
-	auto out = WriteToString(store);
-
-	REQUIRE(Contains(out, "data_block1\n"));
-	REQUIRE(out.rfind("data_block1\n", 0) == 0);
-	REQUIRE(Contains(out, "loop_\n"));
-	REQUIRE(Contains(out, "_foo.a \n"));
-	REQUIRE(Contains(out, "_foo.b \n"));
-	REQUIRE(Contains(out, "1 x \n"));
-	REQUIRE(Contains(out, "2 y \n"));
-	REQUIRE(out.size() >= 3);
-	REQUIRE(out.compare(out.size() - 3, 3, "# \n") == 0);
-}
-
-TEST_CASE("MmcifWriteCif selects quotes, emits text blocks and nulls", "[mmcif][writer]") {
-	std::vector<std::vector<std::string>> rows;
-	rows.push_back({"hello world"});          // space -> single-quoted
-	rows.push_back({"loop_x"});               // keyword -> single-quoted
-	rows.push_back({"_x"});                   // leading underscore -> single-quoted
-	rows.push_back({"$id"});                  // leading special char -> single-quoted
-	rows.push_back({"a(b)"});                 // embedded special char -> single-quoted
-	rows.push_back({"it's"});                 // embedded single quote -> double-quoted
-	rows.push_back({"ab\"cd\""});             // embedded double quote -> single-quoted
-	rows.push_back({"say 'hi' and \"bye\""}); // both quote kinds + space -> text block
-	rows.push_back({"a\nb"});                 // embedded newline -> text block
-	rows.push_back({std::string(85, 'z')});   // >= 80 columns -> text block
-	rows.push_back({""});                     // empty -> '?' null
-	auto store = MakeLoopStore("b", "c", {"v"}, std::move(rows));
-	auto out = WriteToString(store);
-
-	REQUIRE(Contains(out, "'hello world'"));
-	REQUIRE(Contains(out, "'loop_x'"));
-	REQUIRE(Contains(out, "'_x'"));
-	REQUIRE(Contains(out, "'$id'"));
-	REQUIRE(Contains(out, "'a(b)'"));
-	REQUIRE(Contains(out, "\"it's\""));
-	REQUIRE(Contains(out, "'ab\"cd\"'"));
-	REQUIRE(Contains(out, ";say 'hi' and \"bye\"\n;\n"));
-	REQUIRE(Contains(out, ";a\nb\n;\n"));
-	REQUIRE(Contains(out, "\n;\n"));
-	REQUIRE(Contains(out, std::string(85, 'z')));
-	REQUIRE(Contains(out, "?"));
-}
-
-TEST_CASE("MmcifWriteCif emits a single-row category as item/value pairs", "[mmcif][writer]") {
-	MmcifWriteStore store;
-	store.data_block_name = "b";
-	MmcifWriteCategory cat;
-	cat.name = "c";
-	cat.is_loop = false;
-	cat.columns = {"a_long_column_name", "s"};
-	cat.rows = {{"hello", "1"}};
-	store.categories.push_back(cat);
-
-	auto out = WriteToString(store);
-	REQUIRE(Contains(out, "data_b\n"));
-	REQUIRE(out.find("loop_") == std::string::npos);
-	REQUIRE(Contains(out, "_c.a_long_column_name"));
-	REQUIRE(Contains(out, "_c.s"));
-	REQUIRE(Contains(out, "hello"));
-	REQUIRE(Contains(out, "1"));
-}
-
-TEST_CASE("MmcifWriteCif skips empty categories", "[mmcif][writer]") {
-	MmcifWriteStore store;
-	store.data_block_name = "b";
-	MmcifWriteCategory cat;
-	cat.name = "empty";
-	cat.is_loop = true;
-	cat.columns = {"v"};
-	// no rows
-	store.categories.push_back(cat);
-
-	auto out = WriteToString(store);
-	REQUIRE(out.find("_empty") == std::string::npos);
-	REQUIRE(out.rfind("data_b\n", 0) == 0);
-}
-
-TEST_CASE("MmcifWriteCif round-trips through the index", "[mmcif][writer][roundtrip]") {
-	auto store = MakeLoopStore("rt", "atom", {"id", "name"}, {{"1", "alpha"}, {"2", "beta two"}});
-	auto out = WriteToString(store);
-
-	TempCif fixture("rt_roundtrip.cif", out);
-	auto index = MmcifIndex::Load(fixture.Str(), nullptr);
-	REQUIRE(index);
-	REQUIRE(index->GetDataBlockName() == "rt");
-	auto *atom = index->FindCategory("atom");
-	REQUIRE(atom);
-	REQUIRE(index->GetRowCount(*atom) == 2);
-
-	auto reread = index->Materialize();
-	auto *ratom = reread->FindCategory("atom");
-	REQUIRE(ratom);
-	auto r0 = reread->GetRow(*ratom, 0);
-	REQUIRE(r0[ColIndex(*ratom, "id")] == "1");
-	REQUIRE(r0[ColIndex(*ratom, "name")] == "alpha");
-	auto r1 = reread->GetRow(*ratom, 1);
-	REQUIRE(r1[ColIndex(*ratom, "id")] == "2");
-	REQUIRE(r1[ColIndex(*ratom, "name")] == "beta two");
+	REQUIRE(f->rows.size() == 2);
+	REQUIRE(f->rows[0][0] == "2");
+	REQUIRE(f->rows[1][0] == "4");
 }
 
 // ---------------------------------------------------------------------------
@@ -440,9 +372,382 @@ TEST_CASE("MmcifFile::IsRemotePath classifies URL schemes", "[mmcif][file]") {
 	REQUIRE(!MmcifFile::IsRemotePath("relative/1AMB.cif"));
 }
 
-TEST_CASE("MmcifFile::Read returns empty content for a missing local file", "[mmcif][file]") {
-	// With no context MmcifFile::Read uses std::ifstream and returns an empty
-	// string for a path that does not exist (no exception on this path).
-	auto content = MmcifFile::Read("/nonexistent/path/mmcif_does_not_exist.cif", nullptr);
-	REQUIRE(content.empty());
+TEST_CASE("MmcifFile::Read throws for a missing local file", "[mmcif][file]") {
+	REQUIRE_THROWS_AS(MmcifFile::Read("/nonexistent/path/mmcif_does_not_exist.cif", nullptr), IOException);
+}
+
+// ---------------------------------------------------------------------------
+// MmcifPatch: surgical write-back. The point of these tests is that the patched
+// text equals the original everywhere except where the transaction changed
+// data, so they assert whole-file equality rather than substrings.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const char *PATCH_SRC = "# top comment\n"
+                        "data_test\n"
+                        "#\n"
+                        "loop_\n"
+                        "_atom.id\n"
+                        "_atom.name\n"
+                        "1 alpha\n"
+                        "2 beta\n"
+                        "# trailing comment\n";
+
+shared_ptr<MmcifWriteStore> PatchFixture(const TempCif &cif) {
+	auto index = MmcifIndex::Load(cif.Str(), nullptr);
+	auto store = index->Materialize();
+	return store;
+}
+
+} // namespace
+
+TEST_CASE("MmcifPatch changes only the bytes of the updated value", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_update.cif", PATCH_SRC);
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("atom");
+	REQUIRE(cat != nullptr);
+
+	store->UpdateCell(*cat, 0, Col(*cat, "name"), "ALPHA");
+	std::string expected = "# top comment\n"
+	                       "data_test\n"
+	                       "#\n"
+	                       "loop_\n"
+	                       "_atom.id\n"
+	                       "_atom.name\n"
+	                       "1 ALPHA\n"
+	                       "2 beta\n"
+	                       "# trailing comment\n";
+	REQUIRE(MmcifPatch::Apply(*store) == expected);
+}
+
+TEST_CASE("MmcifPatch cuts a deleted row out cleanly", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_delete.cif", PATCH_SRC);
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("atom");
+	REQUIRE(cat != nullptr);
+
+	store->DeleteRows(*cat, {0});
+	std::string expected = "# top comment\n"
+	                       "data_test\n"
+	                       "#\n"
+	                       "loop_\n"
+	                       "_atom.id\n"
+	                       "_atom.name\n"
+	                       "2 beta\n"
+	                       "# trailing comment\n";
+	REQUIRE(MmcifPatch::Apply(*store) == expected);
+}
+
+// mmCIF loop rows are a flat token stream, so several rows may share one line.
+static const char *PATCH_SHARED_SRC = "data_t\n"
+                                      "loop_\n"
+                                      "_c.x\n"
+                                      "_c.y\n"
+                                      "  1 2 3 4\n"
+                                      "5 6\n";
+
+static std::string PatchDeleteShared(const std::string &name, const std::vector<idx_t> &rows) {
+	TempCif cif(name, PATCH_SHARED_SRC);
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("c");
+	REQUIRE(cat != nullptr);
+	store->DeleteRows(*cat, rows);
+	return MmcifPatch::Apply(*store);
+}
+
+TEST_CASE("MmcifPatch deletes only its own row from a line shared with other rows", "[mmcif][patch]") {
+	const std::string head = "data_t\nloop_\n_c.x\n_c.y\n";
+	// First row on the line: the indentation stays, the next row moves up.
+	REQUIRE(PatchDeleteShared("mmcif_patch_shared_first.cif", {0}) == head + "  3 4\n5 6\n");
+	// Last row on the line: the separator in front of it goes with it.
+	REQUIRE(PatchDeleteShared("mmcif_patch_shared_last.cif", {1}) == head + "  1 2\n5 6\n");
+	// Every row on the line: the whole line goes, no blank line is left.
+	REQUIRE(PatchDeleteShared("mmcif_patch_shared_both.cif", {0, 1}) == head + "5 6\n");
+	// A run of deleted rows that starts mid-line and ends on the next line.
+	REQUIRE(PatchDeleteShared("mmcif_patch_shared_span.cif", {1, 2}) == head + "  1 2\n");
+	REQUIRE(PatchDeleteShared("mmcif_patch_shared_all.cif", {0, 1, 2}) == head);
+}
+
+TEST_CASE("MmcifPatch keeps a comment between two deleted rows", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_delete_comment.cif", "data_t\nloop_\n_c.x\nA\n# about B\nB\nC\n");
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("c");
+	REQUIRE(cat != nullptr);
+	store->DeleteRows(*cat, {0, 1});
+	REQUIRE(MmcifPatch::Apply(*store) == "data_t\nloop_\n_c.x\n# about B\nC\n");
+}
+
+TEST_CASE("MmcifPatch deletes a key-value row with its tags", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_delete_single.cif",
+	            "data_t\n#\n_entry.title\n;a long\ntitle\n;\n_entry.id B\n#\n_x.y 1\n");
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("entry");
+	REQUIRE(cat != nullptr);
+	store->DeleteRows(*cat, {0});
+	REQUIRE(MmcifPatch::Apply(*store) == "data_t\n#\n#\n_x.y 1\n");
+}
+
+TEST_CASE("MmcifPatch inserts after a line holding several rows", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_shared_insert.cif", "data_t\nloop_\n_c.x\n_c.y\n1 2 3 4\n# end\n");
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("c");
+	REQUIRE(cat != nullptr);
+	store->AddRow(*cat, {"5", "6"});
+	REQUIRE(MmcifPatch::Apply(*store) == "data_t\nloop_\n_c.x\n_c.y\n1 2 3 4\n5 6\n# end\n");
+}
+
+TEST_CASE("MmcifPatch inserts into a loop that ends the file without a newline", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_insert_eof.cif", "data_t\nloop_\n_c.x\n_c.y\n1 2");
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("c");
+	REQUIRE(cat != nullptr);
+	store->AddRow(*cat, {"3", "4"});
+	REQUIRE(MmcifPatch::Apply(*store) == "data_t\nloop_\n_c.x\n_c.y\n1 2\n3 4\n");
+	store->DeleteRows(*cat, {0});
+	REQUIRE(MmcifPatch::Apply(*store) == "data_t\nloop_\n_c.x\n_c.y\n3 4\n");
+}
+
+TEST_CASE("MmcifPatch splices an inserted row in after the last original row", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_insert.cif", PATCH_SRC);
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("atom");
+	REQUIRE(cat != nullptr);
+
+	store->AddRow(*cat, {"3", "gamma"});
+	std::string expected = "# top comment\n"
+	                       "data_test\n"
+	                       "#\n"
+	                       "loop_\n"
+	                       "_atom.id\n"
+	                       "_atom.name\n"
+	                       "1 alpha\n"
+	                       "2 beta\n"
+	                       "3 gamma\n"
+	                       "# trailing comment\n";
+	REQUIRE(MmcifPatch::Apply(*store) == expected);
+}
+
+TEST_CASE("MmcifPatch returns the original bytes for a net-zero edit", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_netzero.cif", PATCH_SRC);
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("atom");
+	REQUIRE(cat != nullptr);
+
+	store->AddRow(*cat, {"3", "gamma"});
+	store->DeleteRows(*cat, {2});
+	REQUIRE(MmcifPatch::Apply(*store) == std::string(PATCH_SRC));
+}
+
+TEST_CASE("MmcifPatch opens a text field in column 1", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_textfield.cif", PATCH_SRC);
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("atom");
+	REQUIRE(cat != nullptr);
+
+	// A multi-line value cannot stay on the row's line: the ';...' block has to
+	// start at column 1, so the row breaks first.
+	store->UpdateCell(*cat, 0, Col(*cat, "name"), "line one\nline two");
+	std::string expected = "# top comment\n"
+	                       "data_test\n"
+	                       "#\n"
+	                       "loop_\n"
+	                       "_atom.id\n"
+	                       "_atom.name\n"
+	                       "1 \n"
+	                       ";line one\n"
+	                       "line two\n"
+	                       ";\n"
+	                       "2 beta\n"
+	                       "# trailing comment\n";
+	REQUIRE(MmcifPatch::Apply(*store) == expected);
+}
+
+TEST_CASE("MmcifPatch ends the line after a text field's closing ';'", "[mmcif][patch]") {
+	const std::string head = "data_t\nloop_\n_c.x\n_c.y\n_c.z\n";
+	TempCif cif("mmcif_patch_textfield_midrow.cif", head + "1 a 2\n");
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("c");
+	REQUIRE(cat != nullptr);
+
+	// Updated mid-row: the rest of the source row moves to the next line.
+	store->UpdateCell(*cat, 0, Col(*cat, "y"), "both ' and \"");
+	// Inserted row: values after the text field start a new line too.
+	store->AddRow(*cat, {"3", "x\ny", "4"});
+	REQUIRE(MmcifPatch::Apply(*store) == head + "1 \n;both ' and \"\n;\n 2\n3\n;x\ny\n;\n4\n");
+}
+
+TEST_CASE("MmcifPatch quotes values with embedded quotes", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_embedded_quotes.cif", PATCH_SRC);
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("atom");
+	REQUIRE(cat != nullptr);
+
+	store->UpdateCell(*cat, 0, Col(*cat, "name"), "H5'1");
+	store->UpdateCell(*cat, 1, Col(*cat, "name"), "a\"b");
+	auto out = MmcifPatch::Apply(*store);
+	REQUIRE(out.find("1 \"H5'1\"\n") != std::string::npos);
+	REQUIRE(out.find("2 'a\"b'\n") != std::string::npos);
+}
+
+TEST_CASE("MmcifPatch keeps extra data blocks and save frames verbatim", "[mmcif][patch]") {
+	const char *multi = "# preamble\n"
+	                    "data_FIRST\n"
+	                    "#\n"
+	                    "loop_\n"
+	                    "_a.id\n"
+	                    "_a.v\n"
+	                    "1 one\n"
+	                    "# between blocks\n"
+	                    "data_SECOND\n"
+	                    "_a.id 9\n"
+	                    "_a.v 'second block value'\n";
+	TempCif cif("mmcif_patch_multiblock.cif", multi);
+	auto store = PatchFixture(cif);
+	// The store does not model the second block, but the patch keeps its bytes.
+	auto *cat = store->FindCategory("a");
+	REQUIRE(cat != nullptr);
+
+	store->UpdateCell(*cat, 0, Col(*cat, "v"), "ONE");
+	std::string expected = "# preamble\n"
+	                       "data_FIRST\n"
+	                       "#\n"
+	                       "loop_\n"
+	                       "_a.id\n"
+	                       "_a.v\n"
+	                       "1 ONE\n"
+	                       "# between blocks\n"
+	                       "data_SECOND\n"
+	                       "_a.id 9\n"
+	                       "_a.v 'second block value'\n";
+	REQUIRE(MmcifPatch::Apply(*store) == expected);
+}
+
+TEST_CASE("MmcifPatch refuses a value it cannot represent", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_unrepresentable.cif", PATCH_SRC);
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("atom");
+	REQUIRE(cat != nullptr);
+
+	// A text field cannot contain a line starting with ';'.
+	store->UpdateCell(*cat, 0, Col(*cat, "name"), "ok\n;not ok");
+	REQUIRE_THROWS_AS(MmcifPatch::Apply(*store), IOException);
+}
+
+TEST_CASE("MmcifPatch keeps a CRLF file's line ending convention", "[mmcif][patch]") {
+	const char *crlf = "# top comment\r\n"
+	                   "data_test\r\n"
+	                   "loop_\r\n"
+	                   "_atom.id\r\n"
+	                   "_atom.name\r\n"
+	                   "1 alpha\r\n"
+	                   "2 beta\r\n";
+	TempCif cif("mmcif_patch_crlf.cif", crlf);
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("atom");
+	REQUIRE(cat != nullptr);
+
+	// A plain update leaves every line ending alone.
+	store->UpdateCell(*cat, 0, Col(*cat, "name"), "ALPHA");
+	REQUIRE(MmcifPatch::Apply(*store) == std::string("# top comment\r\ndata_test\r\nloop_\r\n_atom.id\r\n_atom.name\r\n"
+	                                                 "1 ALPHA\r\n"
+	                                                 "2 beta\r\n"));
+
+	// A value that needs a text field breaks the line with CRLF, not LF.
+	store->UpdateCell(*cat, 1, Col(*cat, "name"), "both 'quotes' and \"quotes\"");
+	REQUIRE(MmcifPatch::Apply(*store) == std::string("# top comment\r\ndata_test\r\nloop_\r\n_atom.id\r\n_atom.name\r\n"
+	                                                 "1 ALPHA\r\n"
+	                                                 "2 \r\n"
+	                                                 ";both 'quotes' and \"quotes\"\r\n"
+	                                                 ";\r\n"));
+}
+
+TEST_CASE("MmcifPatch promotes item/value categories to loops when inserting rows", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_promote.cif",
+	            "data_t\n_entry.id original\n\n# keep\n_entry.note\n;long\nnote\n;\n_entry.empty\n");
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("entry");
+	store->AddRow(*cat, {"added", "new note", "present"});
+	store->UpdateCell(*cat, 0, Col(*cat, "id"), "updated");
+	TempCif patched("mmcif_patch_promoted.cif", MmcifPatch::Apply(*store));
+	auto reloaded = PatchFixture(patched);
+	REQUIRE(reloaded->FindCategory("entry")->rows ==
+	        std::vector<std::vector<string>> {{"updated", "long\nnote", "?"}, {"added", "new note", "present"}});
+	REQUIRE(Contains(MmcifFile::Read(patched.Str(), nullptr), "# keep\n"));
+	REQUIRE(Contains(MmcifFile::Read(patched.Str(), nullptr), "\n\n# keep\n"));
+
+	store->DeleteRows(*cat, {0});
+	store->AddRow(*cat, {"another", "note", "value"});
+	TempCif replaced("mmcif_patch_promoted_replaced.cif", MmcifPatch::Apply(*store));
+	REQUIRE(PatchFixture(replaced)->FindCategory("entry")->rows == cat->rows);
+}
+
+TEST_CASE("MmcifPatch preserves trailing newlines in text fields", "[mmcif][patch]") {
+	for (const auto &eol : {std::string("\n"), std::string("\r\n")}) {
+		TempCif cif("mmcif_patch_trailing_newline.cif", "data_t" + eol + "_entry.note original" + eol);
+		for (const auto &value : {std::string("hello\n"), std::string("hello\n\n"), std::string("\n")}) {
+			auto store = PatchFixture(cif);
+			auto *cat = store->FindCategory("entry");
+			store->UpdateCell(*cat, 0, 0, value);
+			TempCif patched("mmcif_patch_trailing_newline_roundtrip.cif", MmcifPatch::Apply(*store));
+			REQUIRE(PatchFixture(patched)->FindCategory("entry")->rows[0][0] == value);
+		}
+	}
+}
+
+TEST_CASE("MmcifPatch inserts into an empty loop after deleting all rows and reloading", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_empty_loop_source.cif", "data_t\nloop_\n_entry.id\noriginal\n");
+	auto store = PatchFixture(cif);
+	store->DeleteRows(*store->FindCategory("entry"), {0});
+	TempCif empty("mmcif_patch_empty_loop.cif", MmcifPatch::Apply(*store));
+	auto reloaded = PatchFixture(empty);
+	auto *cat = reloaded->FindCategory("entry");
+	REQUIRE(cat->rows.empty());
+	reloaded->AddRow(*cat, {"new"});
+	TempCif filled("mmcif_patch_empty_loop_filled.cif", MmcifPatch::Apply(*reloaded));
+	REQUIRE(PatchFixture(filled)->FindCategory("entry")->rows == cat->rows);
+
+	TempCif middle("mmcif_patch_empty_loop_middle.cif", "data_t\nloop_\n_entry.id\n# keep\nloop_\n_other.id\nx\n");
+	auto middle_store = PatchFixture(middle);
+	REQUIRE(middle_store->FindCategory("entry")->rows.empty());
+	middle_store->AddRow(*middle_store->FindCategory("entry"), {"new"});
+	TempCif middle_filled("mmcif_patch_empty_loop_middle_filled.cif", MmcifPatch::Apply(*middle_store));
+	auto middle_reloaded = PatchFixture(middle_filled);
+	REQUIRE(middle_reloaded->FindCategory("entry")->rows[0][0] == "new");
+	REQUIRE(middle_reloaded->FindCategory("other")->rows[0][0] == "x");
+}
+
+TEST_CASE("MmcifPatch deletes tags separated from their values by comments and blank lines", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_nextline_delete.cif",
+	            "data_t\n_entry.id\n# between tag and value\n\noriginal\n_other.id keep\n");
+	auto store = PatchFixture(cif);
+	store->DeleteRows(*store->FindCategory("entry"), {0});
+	auto text = MmcifPatch::Apply(*store);
+	REQUIRE(!Contains(text, "_entry.id"));
+	REQUIRE(!Contains(text, "original"));
+	TempCif patched("mmcif_patch_nextline_deleted.cif", text);
+	auto reloaded = PatchFixture(patched);
+	REQUIRE(reloaded->FindCategory("entry") == nullptr);
+	REQUIRE(reloaded->FindCategory("other")->rows[0][0] == "keep");
+}
+
+TEST_CASE("MmcifPatch preserves comments inside deleted loop and key-value rows", "[mmcif][patch]") {
+	for (const auto &eol : {std::string("\n"), std::string("\r\n")}) {
+		TempCif loop("mmcif_patch_delete_inner_loop_comment.cif", "data_t" + eol + "loop_" + eol + "_entry.id" + eol +
+		                                                              "_entry.note" + eol + "A" + eol + "# inside row" +
+		                                                              eol + "B" + eol + "C D" + eol);
+		auto loop_store = PatchFixture(loop);
+		loop_store->DeleteRows(*loop_store->FindCategory("entry"), {0});
+		REQUIRE(MmcifPatch::Apply(*loop_store) == "data_t" + eol + "loop_" + eol + "_entry.id" + eol + "_entry.note" +
+		                                              eol + "# inside row" + eol + "C D" + eol);
+
+		TempCif single("mmcif_patch_delete_inner_single_comment.cif",
+		               "data_t" + eol + "_entry.id" + eol + "# before value" + eol + "A" + eol + "# between items" +
+		                   eol + "_entry.note" + eol + ";body" + eol + "# part of value" + eol + ";" + eol +
+		                   "_other.id keep" + eol);
+		auto single_store = PatchFixture(single);
+		single_store->DeleteRows(*single_store->FindCategory("entry"), {0});
+		REQUIRE(MmcifPatch::Apply(*single_store) ==
+		        "data_t" + eol + "# before value" + eol + "# between items" + eol + "_other.id keep" + eol);
+	}
 }

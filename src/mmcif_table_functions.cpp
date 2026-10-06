@@ -30,16 +30,7 @@ namespace duckdb {
 // ---------------------------------------------------------------------------
 
 unique_ptr<FunctionData> MmcifBindData::Copy() const {
-	auto result = make_uniq<MmcifBindData>();
-	result->file_name = file_name;
-	result->table_name = table_name;
-	result->column_names = column_names;
-	result->column_types = column_types;
-	result->index = index;
-	result->category = category;
-	result->rows = rows;
-	result->table_entry = table_entry;
-	return std::move(result);
+	return make_uniq<MmcifBindData>(*this);
 }
 
 bool MmcifBindData::Equals(const FunctionData &other) const {
@@ -69,6 +60,9 @@ struct MmcifGlobalState : public GlobalTableFunctionState {
 				                                     bind.category->data_end);
 			}
 		}
+		if (bind.write_category) {
+			write_end = bind.write_category->rows.size();
+		}
 	}
 	const MmcifBindData &bind;
 	vector<column_t> column_ids;
@@ -77,6 +71,9 @@ struct MmcifGlobalState : public GlobalTableFunctionState {
 	vector<idx_t> full_to_out;                     // full column index -> output position
 	vector<const MmcifSingleCell *> single_by_col; // full column index -> single cell (broadcast)
 	unique_ptr<MmcifValueCursor> cursor;
+	// Write mode: rows past this one were added after the scan started (an
+	// INSERT ... SELECT from the same table) and are not scanned.
+	idx_t write_end = 0;
 	bool done = false;
 	bool single_done = false;
 
@@ -85,8 +82,7 @@ struct MmcifGlobalState : public GlobalTableFunctionState {
 	}
 };
 
-static void MmcifLoadIndex(MmcifBindData &result, shared_ptr<MmcifIndex> index, const string &table_name,
-                           const string &file_name) {
+void MmcifBindIndex(MmcifBindData &result, shared_ptr<MmcifIndex> index, const string &table_name) {
 	auto cat = index->FindCategory(table_name);
 	if (!cat || cat->columns.empty()) {
 		throw BinderException("mmcif: category '%s' not present in block '%s'", table_name.c_str(),
@@ -95,6 +91,9 @@ static void MmcifLoadIndex(MmcifBindData &result, shared_ptr<MmcifIndex> index, 
 	result.index = std::move(index);
 	result.category = cat;
 	result.column_names = cat->columns;
+	for (auto &col : result.column_names) {
+		result.column_types.push_back(DictionaryIndex::Get().LookupType(table_name, col));
+	}
 }
 
 static unique_ptr<FunctionData> MmcifBind(ClientContext &context, TableFunctionBindInput &input,
@@ -102,18 +101,10 @@ static unique_ptr<FunctionData> MmcifBind(ClientContext &context, TableFunctionB
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto table_name = input.inputs[1].GetValue<string>();
 	auto result = make_uniq<MmcifBindData>();
-	result->file_name = file_name;
-	result->table_name = table_name;
 
-	auto index = MmcifIndex::Load(file_name, &context);
-	MmcifLoadIndex(*result, std::move(index), table_name, file_name);
-
-	for (auto &col : result->column_names) {
-		auto type = DictionaryIndex::Get().LookupType(table_name, col);
-		result->column_types.push_back(type);
-		names.push_back(col);
-		return_types.push_back(std::move(type));
-	}
+	MmcifBindIndex(*result, MmcifIndex::Load(file_name, &context), table_name);
+	names.assign(result->column_names.begin(), result->column_names.end());
+	return_types.assign(result->column_types.begin(), result->column_types.end());
 	return std::move(result);
 }
 
@@ -122,47 +113,47 @@ static unique_ptr<GlobalTableFunctionState> MmcifInitGlobal(ClientContext &conte
 	return make_uniq<MmcifGlobalState>(bind, input.column_ids);
 }
 
-// Index-backed scan (recommendation 3/5/6): parse the category's loop range
+// Index-backed scan: parse the category's loop range
 // incrementally from the byte cursor, row-major, into per-column VARCHAR
 // vectors, then vectorized-cast each column to its dictionary type. LIMIT
 // pushdown falls out naturally: we stop after the requested rows are filled.
-static void MmcifScanIndex(ClientContext &context, TableFunctionInput &data, DataChunk &output,
-                           MmcifGlobalState &gstate) {
+static idx_t MmcifScanIndex(DataChunk &output, MmcifGlobalState &gstate, vector<unique_ptr<Vector>> &tmp,
+                            vector<string_t *> &ptrs) {
 	auto &cat = *gstate.bind.category;
 	idx_t out_cols = output.ColumnCount();
-	vector<unique_ptr<Vector>> tmp(out_cols);
-	vector<string_t *> ptrs(out_cols);
-	for (idx_t c = 0; c < out_cols; c++) {
-		tmp[c] = make_uniq<Vector>(LogicalType::VARCHAR);
-		ptrs[c] = FlatVector::GetData<string_t>(*tmp[c]);
-	}
 
 	idx_t count = 0;
 	if (cat.is_loop) {
 		idx_t loop_ncols = cat.loop_col_map.size();
 		while (count < STANDARD_VECTOR_SIZE && !gstate.done) {
-			bool ok = true;
-			for (idx_t li = 0; li < loop_ncols; li++) {
-				idx_t full_col = cat.loop_col_map[li];
-				idx_t out_pos = gstate.full_to_out[full_col];
+			idx_t li = 0;
+			for (; li < loop_ncols; li++) {
+				idx_t out_pos = gstate.full_to_out[cat.loop_col_map[li]];
 				const char *out;
 				idx_t len;
 				bool is_null;
 				if (!gstate.cursor->Next(&out, &len, &is_null)) {
-					ok = false;
+					gstate.done = true;
 					break;
 				}
 				if (out_pos != DConstants::INVALID_INDEX) {
 					if (is_null) {
 						FlatVector::SetNull(*tmp[out_pos], count, true);
 					} else {
+						MmcifUnquote(out, len);
 						ptrs[out_pos][count] = string_t(out, UnsafeNumericCast<uint32_t>(len));
 					}
 				}
 			}
-			if (!ok) {
-				gstate.done = true;
-				break;
+			if (li == 0) {
+				break; // cursor exhausted at a row boundary
+			}
+			// A partial trailing row: its missing values are NULL.
+			for (; li < loop_ncols; li++) {
+				idx_t out_pos = gstate.full_to_out[cat.loop_col_map[li]];
+				if (out_pos != DConstants::INVALID_INDEX) {
+					FlatVector::SetNull(*tmp[out_pos], count, true);
+				}
 			}
 			for (idx_t c = 0; c < out_cols; c++) {
 				auto col_id = gstate.column_ids[c];
@@ -178,8 +169,7 @@ static void MmcifScanIndex(ClientContext &context, TableFunctionInput &data, Dat
 	} else {
 		// Single-tag category: exactly one row.
 		if (gstate.single_done) {
-			output.SetCardinality(0);
-			return;
+			return 0;
 		}
 		for (idx_t c = 0; c < out_cols; c++) {
 			auto col_id = gstate.column_ids[c];
@@ -190,7 +180,10 @@ static void MmcifScanIndex(ClientContext &context, TableFunctionInput &data, Dat
 			} else {
 				auto sc = (col_id < gstate.ncols) ? gstate.single_by_col[col_id] : nullptr;
 				if (sc && !sc->is_null) {
-					ptrs[c][0] = string_t(gstate.bind.index->GetData() + sc->off, UnsafeNumericCast<uint32_t>(sc->len));
+					const char *value = gstate.bind.index->GetData() + sc->off;
+					idx_t len = sc->len;
+					MmcifUnquote(value, len);
+					ptrs[c][0] = string_t(value, UnsafeNumericCast<uint32_t>(len));
 				} else {
 					FlatVector::SetNull(*tmp[c], 0, true);
 				}
@@ -200,7 +193,47 @@ static void MmcifScanIndex(ClientContext &context, TableFunctionInput &data, Dat
 		gstate.single_done = true;
 	}
 
-	// Vectorized cast VARCHAR -> dictionary type for each real column.
+	return count;
+}
+
+// Write-mode scan: the store's rows, by index (an INSERT sink may grow the row
+// vector between chunks). Cells are copied into the vector because an UPDATE
+// sink overwrites store cells while this chunk's values are still in use.
+static idx_t MmcifScanStore(DataChunk &output, MmcifGlobalState &gstate, vector<unique_ptr<Vector>> &tmp,
+                            vector<string_t *> &ptrs) {
+	auto &rows = gstate.bind.write_category->rows;
+	idx_t count = 0;
+	for (; gstate.position < gstate.write_end && count < STANDARD_VECTOR_SIZE; gstate.position++, count++) {
+		auto &row = rows[gstate.position];
+		for (idx_t c = 0; c < output.ColumnCount(); c++) {
+			auto col_id = gstate.column_ids[c];
+			if (col_id == COLUMN_IDENTIFIER_ROW_ID) {
+				output.data[c].SetValue(count, Value::Numeric(LogicalType::BIGINT, gstate.position));
+			} else if (col_id == COLUMN_IDENTIFIER_EMPTY) {
+				output.data[c].SetValue(count, Value(true));
+			} else if (MmcifBindData::IsNullCell(row[col_id])) {
+				FlatVector::SetNull(*tmp[c], count, true);
+			} else {
+				ptrs[c][count] = StringVector::AddString(*tmp[c], row[col_id]);
+			}
+		}
+	}
+	return count;
+}
+
+// Both modes fill per-column VARCHAR vectors, then cast each column to its
+// dictionary type in one vectorized pass.
+static void MmcifScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &gstate = data.global_state->Cast<MmcifGlobalState>();
+	idx_t out_cols = output.ColumnCount();
+	vector<unique_ptr<Vector>> tmp(out_cols);
+	vector<string_t *> ptrs(out_cols);
+	for (idx_t c = 0; c < out_cols; c++) {
+		tmp[c] = make_uniq<Vector>(LogicalType::VARCHAR);
+		ptrs[c] = FlatVector::GetData<string_t>(*tmp[c]);
+	}
+	idx_t count = gstate.bind.write_category ? MmcifScanStore(output, gstate, tmp, ptrs)
+	                                         : MmcifScanIndex(output, gstate, tmp, ptrs);
 	for (idx_t c = 0; c < out_cols; c++) {
 		auto col_id = gstate.column_ids[c];
 		if (col_id == COLUMN_IDENTIFIER_ROW_ID || col_id == COLUMN_IDENTIFIER_EMPTY) {
@@ -208,42 +241,6 @@ static void MmcifScanIndex(ClientContext &context, TableFunctionInput &data, Dat
 		}
 		VectorOperations::Cast(context, *tmp[c], output.data[c], count);
 	}
-	output.SetCardinality(count);
-}
-
-static void MmcifScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
-	auto &gstate = data.global_state->Cast<MmcifGlobalState>();
-	auto &bind = gstate.bind;
-	if (bind.index && bind.category) {
-		MmcifScanIndex(context, data, output, gstate);
-		return;
-	}
-	// Legacy write-mode scan over materialized rows.
-	idx_t row = gstate.position;
-	idx_t count = 0;
-	while (row < bind.rows.size() && count < STANDARD_VECTOR_SIZE) {
-		const auto &r = bind.rows[row];
-		for (idx_t c = 0; c < output.ColumnCount(); c++) {
-			auto col_id = gstate.column_ids[c];
-			auto &vec = output.data[c];
-			if (col_id == COLUMN_IDENTIFIER_ROW_ID || col_id == COLUMN_IDENTIFIER_EMPTY) {
-				if (col_id == COLUMN_IDENTIFIER_ROW_ID) {
-					vec.SetValue(count, Value::Numeric(LogicalType::BIGINT, row));
-				} else {
-					vec.SetValue(count, Value(true));
-				}
-				continue;
-			}
-			if (MmcifBindData::IsNullCell(r[col_id])) {
-				vec.SetValue(count, Value());
-			} else {
-				vec.SetValue(count, Value(r[col_id]));
-			}
-		}
-		row++;
-		count++;
-	}
-	gstate.position = row;
 	output.SetCardinality(count);
 }
 
@@ -255,7 +252,7 @@ TableFunction MmcifScanFunction() {
 }
 
 // ---------------------------------------------------------------------------
-// Metadata table functions (global, issue 02): mmcif_tables(file),
+// Metadata table functions (global): mmcif_tables(file),
 // mmcif_columns(file), and mmcif_relationships(file), filtered to categories
 // present in the file.
 // ---------------------------------------------------------------------------
@@ -264,9 +261,7 @@ struct MmcifMetaBindData : public FunctionData {
 	std::vector<std::vector<Value>> rows;
 
 	unique_ptr<FunctionData> Copy() const override {
-		auto result = make_uniq<MmcifMetaBindData>();
-		result->rows = rows;
-		return std::move(result);
+		return make_uniq<MmcifMetaBindData>(*this);
 	}
 	bool Equals(const FunctionData &other) const override {
 		return false;
@@ -274,12 +269,10 @@ struct MmcifMetaBindData : public FunctionData {
 };
 
 struct MmcifMetaGlobalState : public GlobalTableFunctionState {
-	MmcifMetaGlobalState(const MmcifMetaBindData &bind_p, const vector<column_t> &column_ids_p)
-	    : bind(bind_p), column_ids(column_ids_p), position(0) {
+	explicit MmcifMetaGlobalState(const vector<column_t> &column_ids_p) : column_ids(column_ids_p) {
 	}
-	const MmcifMetaBindData &bind;
 	vector<column_t> column_ids;
-	idx_t position;
+	idx_t position = 0;
 
 	idx_t MaxThreads() const override {
 		return 1;
@@ -287,25 +280,18 @@ struct MmcifMetaGlobalState : public GlobalTableFunctionState {
 };
 
 static unique_ptr<GlobalTableFunctionState> MmcifMetaInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
-	auto &bind = input.bind_data->Cast<MmcifMetaBindData>();
-	return make_uniq<MmcifMetaGlobalState>(bind, input.column_ids);
+	return make_uniq<MmcifMetaGlobalState>(input.column_ids);
 }
 
 static void MmcifMetaScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &gstate = data.global_state->Cast<MmcifMetaGlobalState>();
-	auto &bind = gstate.bind;
-	idx_t row = gstate.position;
+	auto &rows = data.bind_data->Cast<MmcifMetaBindData>().rows;
 	idx_t count = 0;
-	while (row < bind.rows.size() && count < STANDARD_VECTOR_SIZE) {
-		const auto &r = bind.rows[row];
+	for (; gstate.position < rows.size() && count < STANDARD_VECTOR_SIZE; gstate.position++, count++) {
 		for (idx_t c = 0; c < output.ColumnCount(); c++) {
-			auto col_id = gstate.column_ids[c];
-			output.data[c].SetValue(count, r[col_id]);
+			output.data[c].SetValue(count, rows[gstate.position][gstate.column_ids[c]]);
 		}
-		row++;
-		count++;
 	}
-	gstate.position = row;
 	output.SetCardinality(count);
 }
 
@@ -315,21 +301,13 @@ static unique_ptr<FunctionData> MmcifTablesBind(ClientContext &context, TableFun
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto result = make_uniq<MmcifMetaBindData>();
 	auto index = MmcifIndex::Load(file_name, &context);
-	vector<string> categories;
-	index->GetCategoryNames(categories);
 	auto &dictionary = DictionaryIndex::Get();
-	for (auto &category : categories) {
-		auto cat = index->FindCategory(category);
-		D_ASSERT(cat);
-		result->rows.push_back({Value(category), Value(dictionary.GetCategoryUrl(category)),
+	for (auto &cat : index->GetCategories()) {
+		result->rows.push_back({Value(cat->name), Value(dictionary.GetCategoryUrl(cat->name)),
 		                        Value::BIGINT(NumericCast<int64_t>(cat->columns.size()))});
 	}
-	names.emplace_back("table_name");
-	names.emplace_back("comment");
-	names.emplace_back("column_count");
-	return_types.push_back(LogicalType::VARCHAR);
-	return_types.push_back(LogicalType::VARCHAR);
-	return_types.push_back(LogicalType::BIGINT);
+	names = {"table_name", "comment", "column_count"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT};
 	return std::move(result);
 }
 
@@ -339,32 +317,20 @@ static unique_ptr<FunctionData> MmcifColumnsBind(ClientContext &context, TableFu
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto result = make_uniq<MmcifMetaBindData>();
 	auto index = MmcifIndex::Load(file_name, &context);
-	vector<string> categories;
-	index->GetCategoryNames(categories);
-	for (auto &category : categories) {
-		auto cat = index->FindCategory(category);
-		if (!cat) {
-			continue;
-		}
+	auto &dictionary = DictionaryIndex::Get();
+	for (auto &cat : index->GetCategories()) {
+		auto &category = cat->name;
 		for (idx_t column_index = 0; column_index < cat->columns.size(); column_index++) {
 			auto &col = cat->columns[column_index];
-			auto &dictionary = DictionaryIndex::Get();
 			auto type = dictionary.LookupType(category, col);
 			vector<Value> row = {Value(category), Value(col), Value::INTEGER(NumericCast<int32_t>(column_index + 1)),
 			                     Value(dictionary.GetItemUrl(category, col)), Value(type.ToString())};
 			result->rows.push_back(std::move(row));
 		}
 	}
-	names.emplace_back("table_name");
-	names.emplace_back("column_name");
-	names.emplace_back("column_index");
-	names.emplace_back("comment");
-	names.emplace_back("data_type");
-	return_types.push_back(LogicalType::VARCHAR);
-	return_types.push_back(LogicalType::VARCHAR);
-	return_types.push_back(LogicalType::INTEGER);
-	return_types.push_back(LogicalType::VARCHAR);
-	return_types.push_back(LogicalType::VARCHAR);
+	names = {"table_name", "column_name", "column_index", "comment", "data_type"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::INTEGER, LogicalType::VARCHAR,
+	                LogicalType::VARCHAR};
 	return std::move(result);
 }
 
@@ -382,8 +348,7 @@ static unique_ptr<FunctionData> MmcifRelationshipsBind(ClientContext &context, T
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto result = make_uniq<MmcifMetaBindData>();
 	auto index = MmcifIndex::Load(file_name, &context);
-	vector<string> categories;
-	index->GetCategoryNames(categories);
+	auto categories = index->GetCategoryNames();
 	case_insensitive_set_t present(categories.begin(), categories.end());
 	for (auto &rel : DictionaryIndex::Get().GetRelationships()) {
 		auto parent_item = MmcifSplitItem(rel.first);
@@ -394,14 +359,8 @@ static unique_ptr<FunctionData> MmcifRelationshipsBind(ClientContext &context, T
 			result->rows.push_back(std::move(row));
 		}
 	}
-	names.emplace_back("parent_table");
-	names.emplace_back("parent_column");
-	names.emplace_back("child_table");
-	names.emplace_back("child_column");
-	return_types.push_back(LogicalType::VARCHAR);
-	return_types.push_back(LogicalType::VARCHAR);
-	return_types.push_back(LogicalType::VARCHAR);
-	return_types.push_back(LogicalType::VARCHAR);
+	names = {"parent_table", "parent_column", "child_table", "child_column"};
+	return_types = vector<LogicalType>(4, LogicalType::VARCHAR);
 	return std::move(result);
 }
 

@@ -200,10 +200,37 @@ SELECT * FROM nonexistent_table;
 ----
 Catalog Error: Table with name nonexistent_table does not exist!
 
+# A partial trailing loop row is read, with its missing values as NULL
+statement ok
+COPY (SELECT 'data_p' || chr(10) || 'loop_' || chr(10) || '_p.a' || chr(10) || '_p.b' || chr(10) || '1 2' || chr(10) || '3') TO '__TEST_DIR__/mmcif_partial.cif' (FORMAT CSV, HEADER 0, QUOTE '');
+
+query II
+SELECT * FROM mmcif_scan('__TEST_DIR__/mmcif_partial.cif', 'p');
+----
+1	2
+3	NULL
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_partial.cif' AS partial (TYPE mmcif);
+
+query I
+SELECT count(*) FROM partial.p;
+----
+2
+
+statement ok
+DETACH partial
+
 # ---------------------------------------------------------------------------
-# Write mode (issue 01/02): ATTACH ... (READ_WRITE TRUE) enables row-level
+# Write mode: ATTACH ... (READ_WRITE TRUE) enables row-level
 # INSERT/UPDATE/DELETE, with write-back on COMMIT and ROLLBACK discarding.
 # ---------------------------------------------------------------------------
+
+# Write mode cannot create a file: attaching a missing one fails like read-only does.
+statement error
+ATTACH '__TEST_DIR__/mmcif_missing.cif' AS missing (TYPE mmcif, READ_WRITE TRUE);
+----
+IO Error: mmcif: file not found
 
 # Create a small writable cif fixture inside the test temp dir
 statement ok
@@ -275,7 +302,7 @@ SELECT count(*) FROM atom_site;
 statement ok
 COMMIT;
 
-# ROLLBACK discards in-memory mutations by re-parsing from disk
+# ROLLBACK discards the transaction's private copy of the store
 statement ok
 BEGIN;
 
@@ -456,6 +483,114 @@ G1
 G2
 
 # ---------------------------------------------------------------------------
+# Comment retention: the write-back must put the '#' lines it read back where
+# they belong instead of dropping them. A comment inside loop data no longer
+# truncates the loop either, so the rows after it survive a write-back too.
+# ---------------------------------------------------------------------------
+
+statement ok
+USE memory;
+
+statement ok
+COPY (SELECT t FROM (VALUES ('# file comment'), ('# second preamble line'), ('data_test'), ('# before the loop'), ('loop_'), ('_atom_site.label_atom_id'), ('_atom_site.Cartn_x'), ('C1'), ('1.5'), ('# between rows'), ('N1'), ('2.5'), ('# trailing comment')) AS v(t)) TO '__TEST_DIR__/mmcif_comments.cif' (FORMAT CSV, HEADER 0, QUOTE '');
+
+# The fixture's comment lines, in file order
+query I
+SELECT line FROM (SELECT unnest(string_split(content, E'\n')) AS line FROM read_text('__TEST_DIR__/mmcif_comments.cif')) WHERE line LIKE '#%';
+----
+# file comment
+# second preamble line
+# before the loop
+# between rows
+# trailing comment
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_comments.cif' AS cmdb (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok
+USE cmdb;
+
+# The row below the in-loop comment is data, not a truncation
+query TT
+SELECT label_atom_id, Cartn_x FROM atom_site ORDER BY label_atom_id;
+----
+C1	1.5
+N1	2.5
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO atom_site (label_atom_id, Cartn_x) VALUES ('O1', 3.5);
+
+statement ok
+COMMIT;
+
+# Every comment is still on disk, in the original order
+query I
+SELECT line FROM (SELECT unnest(string_split(content, E'\n')) AS line FROM read_text('__TEST_DIR__/mmcif_comments.cif')) WHERE line LIKE '#%';
+----
+# file comment
+# second preamble line
+# before the loop
+# between rows
+# trailing comment
+
+# ... and each one still sits in front of what it annotated
+query I
+SELECT (starts_with(content, E'# file comment\n# second preamble line\ndata_test\n') AND contains(content, E'# before the loop\nloop_') AND contains(content, E'# between rows\nN1') AND ends_with(content, E'# trailing comment\n'))::INT
+FROM read_text('__TEST_DIR__/mmcif_comments.cif');
+----
+1
+
+# The write-back is still readable, with the inserted row appended
+statement ok
+USE memory;
+
+statement ok
+DETACH cmdb;
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_comments.cif' AS rcdb (TYPE mmcif);
+
+query TT
+SELECT label_atom_id, Cartn_x FROM rcdb.atom_site ORDER BY label_atom_id;
+----
+C1	1.5
+N1	2.5
+O1	3.5
+
+# ROLLBACK keeps the committed store, comments included
+statement ok
+USE rcdb;
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_comments.cif' AS wdb2 (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok
+USE wdb2;
+
+statement ok
+BEGIN;
+
+statement ok
+DELETE FROM atom_site WHERE label_atom_id <> 'C1';
+
+statement ok
+ROLLBACK;
+
+statement ok
+USE memory;
+
+statement ok
+DETACH wdb2;
+
+query I
+SELECT count(*) FROM (SELECT unnest(string_split(content, E'\n')) AS line FROM read_text('__TEST_DIR__/mmcif_comments.cif')) WHERE line LIKE '#%';
+----
+5
+
+# ---------------------------------------------------------------------------
 # Remote (http/https/s3/...) mmcif files are always read-only: attaching one
 # with READ_WRITE TRUE is rejected. (A URL scheme that DuckDB core recognizes
 # would first demand httpfs, so a non-core scheme is used here to exercise the
@@ -515,7 +650,7 @@ pdbx_chem_comp_identifier
 query TTT
 SELECT id, type, formula FROM chem_comp;
 ----
-ATP	NON-POLYMER	"C10 H16 N5 O13 P3"
+ATP	NON-POLYMER	C10 H16 N5 O13 P3
 
 # Dictionary-driven column types for single-tag items too
 query TT
@@ -570,3 +705,365 @@ ZKHQWZAMYRWXGA-KQYNXXCUSA-N
 
 statement ok
 USE memory;
+
+# ---------------------------------------------------------------------------
+# Surgical write-back: a COMMIT changes only the bytes of the data it touched.
+# Column alignment, comments, blank lines, the quoting of values that were not
+# edited, and content the data model does not carry all survive byte for byte.
+# Each case snapshots the file first, then shows that undoing the one edited
+# value in the written file reproduces the original bytes exactly.
+# ---------------------------------------------------------------------------
+
+statement ok
+USE memory;
+
+statement ok
+COPY (SELECT t FROM (VALUES ('# top comment'), ('data_surgical'), ('#'), ('loop_'), ('_atom.id'), ('_atom.name'), ('1     alpha'), ('2     beta'), ('# trailing comment')) AS v(t)) TO '__TEST_DIR__/mmcif_surgical_upd.cif' (FORMAT CSV, HEADER 0, QUOTE '');
+
+statement ok
+CREATE TABLE upd_orig AS SELECT content AS txt FROM read_text('__TEST_DIR__/mmcif_surgical_upd.cif');
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_surgical_upd.cif' AS ud (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok
+USE ud;
+
+statement ok
+UPDATE atom SET name='ALPHA' WHERE id=1;
+
+statement ok
+USE memory;
+
+statement ok
+DETACH ud;
+
+# Undoing the edited value in the written file gives the original file back:
+# nothing else in it moved, repadded or requoted.
+query I
+SELECT (replace(content, 'ALPHA', 'alpha') = (SELECT txt FROM upd_orig))::INT
+FROM read_text('__TEST_DIR__/mmcif_surgical_upd.cif');
+----
+1
+
+# The untouched line keeps the file's own column alignment
+query I
+SELECT contains(content, E'2     beta\n')::INT FROM read_text('__TEST_DIR__/mmcif_surgical_upd.cif');
+----
+1
+
+# Values with embedded quotes are written quoted (wwPDB convention), so naive
+# tokenizers such as pdbe-mmcif-validator do not misread them as quote openers
+statement ok
+ATTACH '__TEST_DIR__/mmcif_surgical_upd.cif' AS ud (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok
+UPDATE ud.atom SET name=CASE id WHEN 1 THEN 'H5''1' ELSE 'a"b' END;
+
+statement ok
+DETACH ud;
+
+query II
+SELECT contains(content, E'1     "H5\'1"\n')::INT, contains(content, E'2     \'a"b\'\n')::INT FROM read_text('__TEST_DIR__/mmcif_surgical_upd.cif');
+----
+1	1
+
+statement ok
+USE memory;
+
+statement ok
+COPY (SELECT t FROM (VALUES ('# top comment'), ('data_surgical'), ('#'), ('loop_'), ('_atom.id'), ('_atom.name'), ('1     alpha'), ('2     beta'), ('# trailing comment')) AS v(t)) TO '__TEST_DIR__/mmcif_surgical_del.cif' (FORMAT CSV, HEADER 0, QUOTE '');
+
+statement ok
+CREATE TABLE del_orig AS SELECT content AS txt FROM read_text('__TEST_DIR__/mmcif_surgical_del.cif');
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_surgical_del.cif' AS dd (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok
+USE dd;
+
+statement ok
+DELETE FROM atom WHERE id=1;
+
+statement ok
+USE memory;
+
+statement ok
+DETACH dd;
+
+# The deleted row's whole line is gone and nothing else changed
+query I
+SELECT (content = replace((SELECT txt FROM del_orig), E'1     alpha\n', ''))::INT
+FROM read_text('__TEST_DIR__/mmcif_surgical_del.cif');
+----
+1
+
+statement ok
+USE memory;
+
+statement ok
+COPY (SELECT t FROM (VALUES ('# top comment'), ('data_surgical'), ('#'), ('loop_'), ('_atom.id'), ('_atom.name'), ('1     alpha'), ('2     beta'), ('# trailing comment')) AS v(t)) TO '__TEST_DIR__/mmcif_surgical_ins.cif' (FORMAT CSV, HEADER 0, QUOTE '');
+
+statement ok
+CREATE TABLE ins_orig AS SELECT content AS txt FROM read_text('__TEST_DIR__/mmcif_surgical_ins.cif');
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_surgical_ins.cif' AS idd (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok
+USE idd;
+
+statement ok
+INSERT INTO atom (id, name) VALUES (3, 'gamma');
+
+statement ok
+USE memory;
+
+statement ok
+DETACH idd;
+
+# Removing the one generated line gives the original file back
+query I
+SELECT (replace(content, E'3 gamma\n', '') = (SELECT txt FROM ins_orig))::INT
+FROM read_text('__TEST_DIR__/mmcif_surgical_ins.cif');
+----
+1
+
+# The new row lands at the end of the loop, above the trailing comment
+query I
+SELECT contains(content, E'2     beta\n3 gamma\n# trailing comment\n')::INT
+FROM read_text('__TEST_DIR__/mmcif_surgical_ins.cif');
+----
+1
+
+statement ok
+USE memory;
+
+statement ok
+COPY (SELECT t FROM (VALUES ('# preamble'), ('data_FIRST'), ('#'), ('loop_'), ('_a.id'), ('_a.v'), ('1 one'), ('# between blocks'), ('data_SECOND'), ('_a.id 9'), ('_a.v ''second block value''')) AS v(t)) TO '__TEST_DIR__/mmcif_surgical_multi.cif' (FORMAT CSV, HEADER 0, QUOTE '');
+
+statement ok
+CREATE TABLE multi_orig AS SELECT content AS txt FROM read_text('__TEST_DIR__/mmcif_surgical_multi.cif');
+
+# A file with more than one data block is writable now: the patch leaves the
+# blocks it does not model exactly as they were instead of dropping them.
+statement ok
+ATTACH '__TEST_DIR__/mmcif_surgical_multi.cif' AS md (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok
+USE md;
+
+# Only the first data block is modelled
+query I
+SELECT count(*) FROM a;
+----
+1
+
+statement ok
+UPDATE a SET v='ONE' WHERE id=1;
+
+statement ok
+USE memory;
+
+statement ok
+DETACH md;
+
+query I
+SELECT (replace(content, 'ONE', 'one') = (SELECT txt FROM multi_orig))::INT
+FROM read_text('__TEST_DIR__/mmcif_surgical_multi.cif');
+----
+1
+
+query I
+SELECT (contains(content, E'data_SECOND\n') AND contains(content, E'second block value'))::INT
+FROM read_text('__TEST_DIR__/mmcif_surgical_multi.cif');
+----
+1
+
+# ---------------------------------------------------------------------------
+# Value grammar: values below their tag, quotes closed only before whitespace,
+# text fields inside loops, and delimiters stripped the same in both modes.
+# ---------------------------------------------------------------------------
+
+statement ok
+USE memory;
+
+statement ok
+COPY (SELECT concat_ws(chr(10), 'data_q', '_s.id 1', '_s.title', '''long title on the next line''', '_s.note ''q'' # comment', '_s.empty', '_s.year 2000', 'loop_', '_l.id', '_l.name', '_l.text', '1 ''it''s'' ;x', '2 "C1''"', ';', 'line one', '', '_not.a_tag', ';', '3 .5 ok')) TO '__TEST_DIR__/mmcif_values.cif' (FORMAT CSV, HEADER 0, QUOTE '');
+
+query IIIII
+SELECT * FROM mmcif_scan('__TEST_DIR__/mmcif_values.cif', 's');
+----
+1	long title on the next line	q	NULL	2000
+
+query III
+SELECT id, name, replace(text, chr(10), '|') FROM mmcif_scan('__TEST_DIR__/mmcif_values.cif', 'l');
+----
+1	it's	;x
+2	C1'	|line one||_not.a_tag
+3	.5	ok
+
+# Lines inside a text field do not become categories
+query I
+SELECT string_agg(table_name, ',') FROM mmcif_tables('__TEST_DIR__/mmcif_values.cif');
+----
+s,l
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_values.cif' AS vd (TYPE mmcif, READ_WRITE TRUE);
+
+query IIIII
+SELECT * FROM vd.s;
+----
+1	long title on the next line	q	NULL	2000
+
+query III
+SELECT id, name, replace(text, chr(10), '|') FROM vd.l;
+----
+1	it's	;x
+2	C1'	|line one||_not.a_tag
+3	.5	ok
+
+# A value the file cannot hold fails the statement, not the COMMIT
+statement error
+UPDATE vd.l SET text = E'a\n;b' WHERE id = '1';
+----
+cannot contain a line starting with ';'
+
+# Updating a value below its tag, and an item without a value, keeps the tags intact
+statement ok
+UPDATE vd.s SET title = 'new', empty = 'e';
+
+statement ok
+DETACH vd;
+
+query I
+SELECT contains(content, E'_s.title\nnew\n_s.note ''q'' # comment\n_s.empty e\n')::INT FROM read_text('__TEST_DIR__/mmcif_values.cif');
+----
+1
+
+query IIIII
+SELECT * FROM mmcif_scan('__TEST_DIR__/mmcif_values.cif', 's');
+----
+1	new	q	e	2000
+
+# ---------------------------------------------------------------------------
+# Write-mode scans read the live store: a self-INSERT sees only the rows that
+# existed when it started, and SET b = a reads a's old value.
+# ---------------------------------------------------------------------------
+
+statement ok
+COPY (SELECT concat_ws(chr(10), 'data_w', 'loop_', '_w.a', '_w.b', 'a_long_first_value x', 'a_long_second_value y')) TO '__TEST_DIR__/mmcif_live.cif' (FORMAT CSV, HEADER 0, QUOTE '');
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_live.cif' AS lv (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok
+INSERT INTO lv.w SELECT * FROM lv.w;
+
+query I
+SELECT count(*) FROM lv.w;
+----
+4
+
+statement ok
+UPDATE lv.w SET a = 'replaced_with_a_long_value', b = a;
+
+query II
+SELECT DISTINCT a, b FROM lv.w ORDER BY b;
+----
+replaced_with_a_long_value	a_long_first_value
+replaced_with_a_long_value	a_long_second_value
+
+statement ok
+DETACH lv;
+
+# ---------------------------------------------------------------------------
+# Each transaction has its own write store: other connections never see, save,
+# or discard its uncommitted changes, and a stale writer gets a conflict.
+# ---------------------------------------------------------------------------
+
+statement ok
+COPY (SELECT concat_ws(chr(10), 'data_t', '_t.v original')) TO '__TEST_DIR__/mmcif_txn.cif' (FORMAT CSV, HEADER 0, QUOTE '');
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_txn.cif' AS tx (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok con1
+BEGIN;
+
+statement ok con1
+UPDATE tx.t SET v = 'from_con1';
+
+query I con2
+SELECT v FROM tx.t;
+----
+original
+
+# con2 commits something unrelated to con1's change: nothing is written
+statement ok con2
+BEGIN;
+
+statement ok con2
+SELECT * FROM tx.t;
+
+statement ok con2
+COMMIT;
+
+query I
+SELECT content LIKE '%original%' FROM read_text('__TEST_DIR__/mmcif_txn.cif');
+----
+true
+
+statement ok con2
+BEGIN;
+
+statement ok con2
+ROLLBACK;
+
+query I con1
+SELECT v FROM tx.t;
+----
+from_con1
+
+# con2 commits first; con1's commit now conflicts and changes nothing
+statement ok con2
+UPDATE tx.t SET v = 'from_con2';
+
+statement error con1
+COMMIT;
+----
+write-write conflict
+
+query I con1
+SELECT v FROM tx.t;
+----
+from_con2
+
+# A transaction whose snapshot is stale fails at its first write
+statement ok con1
+BEGIN;
+
+# the snapshot is taken on first access to tx, not at BEGIN
+statement ok con1
+SELECT * FROM tx.t;
+
+statement ok con2
+UPDATE tx.t SET v = 'again_con2';
+
+statement error con1
+UPDATE tx.t SET v = 'stale';
+----
+write-write conflict
+
+statement ok con1
+ROLLBACK;
+
+query I
+SELECT content LIKE '%again_con2%' FROM read_text('__TEST_DIR__/mmcif_txn.cif');
+----
+true
+
+statement ok
+DETACH tx;

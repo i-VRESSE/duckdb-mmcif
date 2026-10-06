@@ -1,4 +1,4 @@
-// Dictionary type index (issue 03): lazy singleton loaded from the embedded
+// Dictionary type index: lazy singleton loaded from the embedded
 // gzip'd TSV artifacts (dict/*.tsv.gz, embedded at build time). Type keys are
 // "_category.item"; relationships are (parent_item, child_item) pairs where
 // each item is a "_category.item" key carrying both the category (table) and
@@ -31,9 +31,6 @@ public:
 
 private:
 	DictionaryIndex();
-
-	void LoadTypes();
-	void LoadRelationships();
 
 	case_insensitive_map_t<LogicalType> types;
 	std::vector<std::pair<std::string, std::string>> relationships;

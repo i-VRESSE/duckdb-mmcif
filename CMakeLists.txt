@@ -3,10 +3,6 @@ cmake_minimum_required(VERSION 3.5)
 # Set extension name here
 set(TARGET_NAME mmcif)
 
-# DuckDB's extension distribution supports vcpkg. As such, dependencies can be added in ./vcpkg.json and then
-# used in cmake with find_package. Feel free to remove or replace with other dependencies.
-# Note that it should also be removed from vcpkg.json to prevent needlessly installing it..
-
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
@@ -23,7 +19,7 @@ include_directories(${MMCIF_GEN})
 # No external deps: read/write use the no-deps MmcifIndex/MmcifWriteStore core.
 
 # Embed the checked-in gzip'd dictionary artifacts into mmcif_dict_data.hpp so the
-# extension has no runtime data-file dependency (see .scratch/mmcif-extension/map.md).
+# extension has no runtime data-file dependency.
 # The header is generated into ${MMCIF_GEN}, which is on the include path above.
 add_custom_command(
   OUTPUT ${MMCIF_GEN}/mmcif_dict_data.hpp
@@ -39,14 +35,14 @@ add_custom_command(
 )
 
 # Make the extension targets build the generated dict-data header.
-add_custom_target(mmciff_dict_data DEPENDS ${MMCIF_GEN}/mmcif_dict_data.hpp)
+add_custom_target(mmcif_dict_data DEPENDS ${MMCIF_GEN}/mmcif_dict_data.hpp)
 
 set(EXTENSION_SOURCES
   src/mmcif_extension.cpp
   src/mmcif_index.cpp
   src/mmcif_write_store.cpp
   src/mmcif_dictionary.cpp
-  src/mmcif_writer.cpp
+  src/mmcif_patch.cpp
   src/mmcif_file.cpp
   src/mmcif_table_functions.cpp
   src/mmcif_catalog.cpp)
@@ -54,8 +50,8 @@ set(EXTENSION_SOURCES
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
-add_dependencies(${EXTENSION_NAME} mmciff_dict_data)
-add_dependencies(${LOADABLE_EXTENSION_NAME} mmciff_dict_data)
+add_dependencies(${EXTENSION_NAME} mmcif_dict_data)
+add_dependencies(${LOADABLE_EXTENSION_NAME} mmcif_dict_data)
 
 # C++ catch unit tests (test/cpp/*.cpp) using the vendored DuckDB catch header.
 # EXCLUDE_FROM_ALL so normal `make release`/`debug` builds are untouched; build

@@ -28,7 +28,7 @@ SQL tests live in `./test/sql` (see `test/sql/mmcif.test`). Run them with:
 make test
 ```
 
-C++ unit tests live in `./test/cpp` and use the vendored Catch header (`duckdb/third_party/catch/catch.hpp`), like DuckDB's own core tests. They cover the parser / index / write-store / writer core paths the SQL tests can't reach. Run them with:
+C++ unit tests live in `./test/cpp` and use the vendored Catch header (`duckdb/third_party/catch/catch.hpp`), like DuckDB's own core tests. They cover the parser / index / write-store / write-back patch core paths the SQL tests can't reach. Run them with:
 
 ```sh
 make test_cpp
