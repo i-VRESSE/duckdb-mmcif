@@ -1,5 +1,7 @@
 # Commit with two write-mode mmcif attachments — how it works and what breaks
 
+TODO remove this file before PR is merged
+
 Investigation date: 2026-10-02. All findings reproduced against `build/release/duckdb` (v1.5.4, extension built in) with minimal two-file fixtures.
 
 ## How commit works
