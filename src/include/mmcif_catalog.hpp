@@ -30,10 +30,6 @@
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/execution/physical_operator.hpp"
-#include "duckdb/execution/physical_plan_generator.hpp"
-#include "duckdb/planner/operator/logical_insert.hpp"
-#include "duckdb/planner/operator/logical_delete.hpp"
-#include "duckdb/planner/operator/logical_update.hpp"
 
 #include <functional>
 #include <memory>
@@ -46,12 +42,7 @@
 
 namespace duckdb {
 
-// DML operators are defined in mmcif_catalog.cpp; the catalog's
-// PlanInsert/PlanDelete/PlanUpdate bodies instantiate them lazily.
 class MmcifCatalog;
-class MmcifInsertOperator;
-class MmcifDeleteOperator;
-class MmcifUpdateOperator;
 
 // ---------------------------------------------------------------------------
 // MmcifTableEntry: a real TableCatalogEntry whose ColumnList carries dictionary

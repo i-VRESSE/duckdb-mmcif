@@ -13,7 +13,11 @@
 #include "duckdb/common/operator/numeric_cast.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/execution/physical_operator_states.hpp"
+#include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/operator/logical_delete.hpp"
+#include "duckdb/planner/operator/logical_insert.hpp"
+#include "duckdb/planner/operator/logical_update.hpp"
 #include "duckdb/storage/storage_extension.hpp"
 
 #include "mmcif_dictionary.hpp"
@@ -32,20 +36,10 @@ static MmcifWriteCategory *MmcifGetWriteCategory(MmcifWriteStore &store, const s
 	return cat;
 }
 
-// Copy the store rows into the write-mode bind data (row-major snapshot; DML
-// mutates the store, not this copy).
-static void MmcifLoadRows(MmcifWriteCategory *cat, MmcifBindData &result) {
-	result.column_names = cat->columns;
-	result.rows = cat->rows;
-}
-
 // NULL -> empty cell -> written back as "?"
 static string MmcifCellToString(const Vector &vec, idx_t row) {
 	auto val = vec.GetValue(row);
-	if (val.IsNull()) {
-		return ""; // NULL -> empty cell -> written back as "?"
-	}
-	return val.ToString();
+	return val.IsNull() ? "" : val.ToString();
 }
 
 // ---------------------------------------------------------------------------
@@ -235,7 +229,9 @@ TableFunction MmcifTableEntry::GetScanFunction(ClientContext &context, unique_pt
 		// Write mode: materialized store rows (DML mutates the persistent store).
 		auto store = catalog->GetWriteStore();
 		auto cat = MmcifGetWriteCategory(*store, table_name);
-		MmcifLoadRows(cat, *result);
+		result->column_names = cat->columns;
+		// A snapshot: DML mutates the store while this scan feeds it.
+		result->rows = cat->rows;
 		for (auto &col : result->column_names) {
 			result->column_types.push_back(DictionaryIndex::Get().LookupType(table_name, col));
 		}
@@ -373,8 +369,7 @@ void MmcifSchemaEntry::Scan(ClientContext &context, CatalogType type,
 	if (catalog->IsWriteMode()) {
 		categories = catalog->GetWriteStore()->GetCategoryNames();
 	} else {
-		auto index = catalog->GetIndex(&context);
-		index->GetCategoryNames(categories);
+		categories = catalog->GetIndex(&context)->GetCategoryNames();
 	}
 	auto transaction = GetCatalogTransaction(context);
 	for (auto &category : categories) {
@@ -665,7 +660,7 @@ static unique_ptr<Catalog> MmcifAttach(optional_ptr<StorageExtensionInfo> storag
 	// Pipes (e.g. /dev/stdin) are one-shot streams: there is nothing to
 	// write back to on COMMIT, so write mode is rejected instead of
 	// silently losing mutations.
-	if (write_mode && !MmcifFile::IsRemotePath(info.path) && FileSystem::GetFileSystem(context).IsPipe(info.path)) {
+	if (write_mode && FileSystem::GetFileSystem(context).IsPipe(info.path)) {
 		throw InvalidInputException("mmcif: '%s' cannot be attached with READ_WRITE - pipes are read-only", info.path);
 	}
 	return make_uniq<MmcifCatalog>(db, info.path, write_mode, context);

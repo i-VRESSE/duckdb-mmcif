@@ -182,9 +182,7 @@ TEST_CASE("MmcifIndex indexes loop + single-tag, decodes values, keeps first "
 	REQUIRE(index);
 	REQUIRE(index->GetDataBlockName() == "testblock");
 
-	vector<string> names;
-	index->GetCategoryNames(names);
-	REQUIRE(names.size() == 2);
+	REQUIRE(index->GetCategoryNames().size() == 2);
 
 	auto *foo = index->FindCategory("foo");
 	REQUIRE(foo);
@@ -497,6 +495,17 @@ TEST_CASE("MmcifPatch inserts after a line holding several rows", "[mmcif][patch
 	REQUIRE(cat != nullptr);
 	store->AddRow(*cat, {"5", "6"});
 	REQUIRE(MmcifPatch::Apply(*store) == "data_t\nloop_\n_c.x\n_c.y\n1 2 3 4\n5 6\n# end\n");
+}
+
+TEST_CASE("MmcifPatch inserts into a loop that ends the file without a newline", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_insert_eof.cif", "data_t\nloop_\n_c.x\n_c.y\n1 2");
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("c");
+	REQUIRE(cat != nullptr);
+	store->AddRow(*cat, {"3", "4"});
+	REQUIRE(MmcifPatch::Apply(*store) == "data_t\nloop_\n_c.x\n_c.y\n1 2\n3 4\n");
+	store->DeleteRows(*cat, {0});
+	REQUIRE(MmcifPatch::Apply(*store) == "data_t\nloop_\n_c.x\n_c.y\n3 4\n");
 }
 
 TEST_CASE("MmcifPatch splices an inserted row in after the last original row", "[mmcif][patch]") {

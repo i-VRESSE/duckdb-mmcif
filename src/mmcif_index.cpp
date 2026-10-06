@@ -104,12 +104,7 @@ shared_ptr<MmcifIndex> MmcifIndex::Load(const string &path, optional_ptr<ClientC
 	if (GZipFileSystem::CheckIsZip(text.data(), text.size())) {
 		text = GZipFileSystem::UncompressGZIPString(text);
 	}
-	// Append a dummy trailing data block so the parser's "last loop" is flushed;
-	// the index keeps only the FIRST data block.
-	idx_t original_text_size = text.size();
-	text += "\ndata_zzz_prototype\n#\n";
-
-	auto index = shared_ptr<MmcifIndex>(new MmcifIndex(std::move(text), original_text_size));
+	auto index = shared_ptr<MmcifIndex>(new MmcifIndex(std::move(text)));
 	index->Build();
 
 	lock_guard<mutex> l(g_cache_lock);
@@ -364,6 +359,7 @@ void MmcifIndex::Build() {
 			line_start = line_end + 1; // advance past '\n' (or past EOF)
 		}
 	}
+	end_loop(size); // a loop that runs to the end of the file
 	finalize();
 }
 
@@ -376,10 +372,12 @@ MmcifCategory *MmcifIndex::FindCategory(const string &name) {
 	return nullptr;
 }
 
-void MmcifIndex::GetCategoryNames(vector<string> &names) {
+vector<string> MmcifIndex::GetCategoryNames() const {
+	vector<string> names;
 	for (auto &cat : categories) {
 		names.push_back(cat->name);
 	}
+	return names;
 }
 
 idx_t MmcifIndex::GetRowCount(MmcifCategory &cat) {

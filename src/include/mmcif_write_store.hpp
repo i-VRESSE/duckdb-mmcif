@@ -96,7 +96,7 @@ public:
 		dirty = false;
 	}
 
-	// The source text, excluding the parser's synthetic flush block.
+	// The source text.
 	const char *SourceData() const;
 	idx_t SourceSize() const;
 	// The source category record, for the data-region bounds an INSERT needs.

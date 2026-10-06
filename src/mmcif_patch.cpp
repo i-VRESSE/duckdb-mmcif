@@ -291,6 +291,8 @@ std::vector<PatchEdit> DeletionEdits(const MmcifWriteCategory &cat, const char *
 		if (starts_line && ends_line) {
 			if (after < size && src[after] == '\n') {
 				after++;
+			} else if (after >= size && line_start > 0 && src[size - 1] != '\n') {
+				line_start--; // last line has no newline: take the one before it
 			}
 			edits.push_back(PatchEdit {line_start, after, string()});
 		} else if (starts_line) {
@@ -312,7 +314,7 @@ bool IsInsertedRow(const MmcifWriteCategory &cat, idx_t row) {
 string FormatLoopRow(const MmcifWriteCategory &cat, const std::vector<string> &row, const string &eol) {
 	PatchLine line(0, eol);
 	for (idx_t c = 0; c < row.size(); c++) {
-		EmitValue(line, row[c], cat.name + "." + (c < cat.columns.size() ? cat.columns[c] : to_string(c)));
+		EmitValue(line, row[c], cat.name + "." + cat.columns[c]);
 	}
 	if (!line.AtLineStart()) {
 		line.Newline();
@@ -324,7 +326,7 @@ string FormatLoopRow(const MmcifWriteCategory &cat, const std::vector<string> &r
 string FormatItemRow(const MmcifWriteCategory &cat, const std::vector<string> &row, const string &eol) {
 	string out;
 	for (idx_t c = 0; c < row.size(); c++) {
-		string item = c < cat.columns.size() ? cat.columns[c] : to_string(c);
+		auto &item = cat.columns[c];
 		PatchLine line(0, eol);
 		line.Token("_" + cat.name + "." + item);
 		// Same line, so a value that needs a text field breaks to column 1.
@@ -372,11 +374,11 @@ string MmcifPatch::Apply(const MmcifWriteStore &store) {
 				if (span.off == MMCIF_NO_SPAN) {
 					throw IOException("mmcif: cannot write back %s.%s - the item has no "
 					                  "position in the source file",
-					                  cat.name.c_str(), c < cat.columns.size() ? cat.columns[c].c_str() : "?");
+					                  cat.name.c_str(), cat.columns[c].c_str());
 				}
 				PatchLine line(MmcifPatchColumnOf(src, span.off), MmcifPatchEolAt(src, size, span.off));
 				EmitValue(line, cat.rows[r][c],
-				          cat.name + "." + (c < cat.columns.size() ? cat.columns[c] : to_string(c)));
+				          cat.name + "." + cat.columns[c]);
 				string text = line.Str();
 				if (line.AfterTextBlock() && MmcifPatchLineContinues(src, size, span.off + span.len)) {
 					text += line.Eol();
@@ -405,6 +407,9 @@ string MmcifPatch::Apply(const MmcifWriteStore &store) {
 				inserted += cat.is_loop ? FormatLoopRow(cat, cat.rows[r], eol) : FormatItemRow(cat, cat.rows[r], eol);
 			}
 			if (!inserted.empty()) {
+				if (insert_at > 0 && src[insert_at - 1] != '\n') {
+					inserted = eol + inserted; // the source's last line has no newline
+				}
 				edits.push_back(PatchEdit {insert_at, insert_at, inserted});
 			}
 		}

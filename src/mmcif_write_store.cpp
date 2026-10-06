@@ -162,7 +162,7 @@ shared_ptr<MmcifWriteStore> MmcifIndex::Materialize() {
 			wc.cell_spans.push_back(std::move(spans));
 			// A key-value item owns its whole line (tag and value), so the row
 			// covers every line its items are written on.
-			wc.row_spans.push_back(any ? MmcifRowSpanFor(content_data, original_text_size, row_first, row_last)
+			wc.row_spans.push_back(any ? MmcifRowSpanFor(content_data, text.size(), row_first, row_last)
 			                           : MmcifRowSpan {});
 		}
 		store->categories.push_back(std::move(wc));
@@ -228,7 +228,7 @@ const char *MmcifWriteStore::SourceData() const {
 }
 
 idx_t MmcifWriteStore::SourceSize() const {
-	return source_index->GetOriginalTextSize();
+	return source_index->GetSize();
 }
 
 MmcifCategory *MmcifWriteStore::SourceCategory(const string &name) const {

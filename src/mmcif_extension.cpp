@@ -2,7 +2,6 @@
 
 #include "mmcif_extension.hpp"
 #include "duckdb.hpp"
-#include "duckdb/common/exception.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/main/config.hpp"
 

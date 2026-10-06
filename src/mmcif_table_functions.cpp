@@ -113,8 +113,7 @@ static unique_ptr<GlobalTableFunctionState> MmcifInitGlobal(ClientContext &conte
 // incrementally from the byte cursor, row-major, into per-column VARCHAR
 // vectors, then vectorized-cast each column to its dictionary type. LIMIT
 // pushdown falls out naturally: we stop after the requested rows are filled.
-static void MmcifScanIndex(ClientContext &context, TableFunctionInput &data, DataChunk &output,
-                           MmcifGlobalState &gstate) {
+static void MmcifScanIndex(ClientContext &context, DataChunk &output, MmcifGlobalState &gstate) {
 	auto &cat = *gstate.bind.category;
 	idx_t out_cols = output.ColumnCount();
 	vector<unique_ptr<Vector>> tmp(out_cols);
@@ -207,7 +206,7 @@ static void MmcifScan(ClientContext &context, TableFunctionInput &data, DataChun
 	auto &gstate = data.global_state->Cast<MmcifGlobalState>();
 	auto &bind = gstate.bind;
 	if (bind.index && bind.category) {
-		MmcifScanIndex(context, data, output, gstate);
+		MmcifScanIndex(context, output, gstate);
 		return;
 	}
 	// Legacy write-mode scan over materialized rows.
@@ -305,13 +304,9 @@ static unique_ptr<FunctionData> MmcifTablesBind(ClientContext &context, TableFun
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto result = make_uniq<MmcifMetaBindData>();
 	auto index = MmcifIndex::Load(file_name, &context);
-	vector<string> categories;
-	index->GetCategoryNames(categories);
 	auto &dictionary = DictionaryIndex::Get();
-	for (auto &category : categories) {
-		auto cat = index->FindCategory(category);
-		D_ASSERT(cat);
-		result->rows.push_back({Value(category), Value(dictionary.GetCategoryUrl(category)),
+	for (auto &cat : index->GetCategories()) {
+		result->rows.push_back({Value(cat->name), Value(dictionary.GetCategoryUrl(cat->name)),
 		                        Value::BIGINT(NumericCast<int64_t>(cat->columns.size()))});
 	}
 	names = {"table_name", "comment", "column_count"};
@@ -325,13 +320,8 @@ static unique_ptr<FunctionData> MmcifColumnsBind(ClientContext &context, TableFu
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto result = make_uniq<MmcifMetaBindData>();
 	auto index = MmcifIndex::Load(file_name, &context);
-	vector<string> categories;
-	index->GetCategoryNames(categories);
-	for (auto &category : categories) {
-		auto cat = index->FindCategory(category);
-		if (!cat) {
-			continue;
-		}
+	for (auto &cat : index->GetCategories()) {
+		auto &category = cat->name;
 		for (idx_t column_index = 0; column_index < cat->columns.size(); column_index++) {
 			auto &col = cat->columns[column_index];
 			auto &dictionary = DictionaryIndex::Get();
@@ -361,8 +351,7 @@ static unique_ptr<FunctionData> MmcifRelationshipsBind(ClientContext &context, T
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto result = make_uniq<MmcifMetaBindData>();
 	auto index = MmcifIndex::Load(file_name, &context);
-	vector<string> categories;
-	index->GetCategoryNames(categories);
+	auto categories = index->GetCategoryNames();
 	case_insensitive_set_t present(categories.begin(), categories.end());
 	for (auto &rel : DictionaryIndex::Get().GetRelationships()) {
 		auto parent_item = MmcifSplitItem(rel.first);

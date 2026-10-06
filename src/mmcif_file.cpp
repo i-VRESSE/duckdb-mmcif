@@ -23,8 +23,7 @@ namespace duckdb {
 // True for paths that reference a remote resource (http/https URL, S3, etc.)
 // rather than a local file.
 bool MmcifFile::IsRemotePath(const string &path) {
-	auto lower = StringUtil::Lower(path);
-	return lower.find("://") != string::npos;
+	return path.find("://") != string::npos;
 }
 
 // Read the raw bytes of a file. When a client context is available the read

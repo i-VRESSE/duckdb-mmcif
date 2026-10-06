@@ -202,8 +202,11 @@ public:
 	// Find a category by name (case-insensitive). Returns nullptr if absent.
 	MmcifCategory *FindCategory(const string &name);
 
-	// Enumerate all category names.
-	void GetCategoryNames(vector<string> &names);
+	// Category names, in file order.
+	vector<string> GetCategoryNames() const;
+	const vector<unique_ptr<MmcifCategory>> &GetCategories() const {
+		return categories;
+	}
 
 	// Exact row count for a category, computed lazily once by
 	// value-scanning the loop range without materializing strings.
@@ -212,23 +215,16 @@ public:
 	const char *GetData() const {
 		return text.data();
 	}
-	// Size of the file text without the synthetic flush block Load appends.
-	idx_t GetOriginalTextSize() const {
-		return original_text_size;
+	idx_t GetSize() const {
+		return text.size();
 	}
 
 private:
-	MmcifIndex(string text_p, idx_t original_text_size_p)
-	    : text(std::move(text_p)), original_text_size(original_text_size_p) {
+	explicit MmcifIndex(string text_p) : text(std::move(text_p)) {
 	}
 	void Build();
 
 	string text; // decompressed mmCIF text (the flat string arena)
-
-	// Size of the original file text before Load appends the synthetic
-	// "data_zzz_prototype" flush block; extra data_ lines at/after this offset
-	// are parser artifacts, not file content.
-	idx_t original_text_size;
 
 	string data_block_name;
 	vector<unique_ptr<MmcifCategory>> categories;
