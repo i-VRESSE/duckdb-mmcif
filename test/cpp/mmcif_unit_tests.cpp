@@ -714,3 +714,16 @@ TEST_CASE("MmcifPatch inserts into an empty loop after deleting all rows and rel
 	REQUIRE(middle_reloaded->FindCategory("entry")->rows[0][0] == "new");
 	REQUIRE(middle_reloaded->FindCategory("other")->rows[0][0] == "x");
 }
+
+TEST_CASE("MmcifPatch deletes tags separated from their values by comments and blank lines", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_nextline_delete.cif", "data_t\n_entry.id\n# between tag and value\n\noriginal\n_other.id keep\n");
+	auto store = PatchFixture(cif);
+	store->DeleteRows(*store->FindCategory("entry"), {0});
+	auto text = MmcifPatch::Apply(*store);
+	REQUIRE(!Contains(text, "_entry.id"));
+	REQUIRE(!Contains(text, "original"));
+	TempCif patched("mmcif_patch_nextline_deleted.cif", text);
+	auto reloaded = PatchFixture(patched);
+	REQUIRE(reloaded->FindCategory("entry") == nullptr);
+	REQUIRE(reloaded->FindCategory("other")->rows[0][0] == "keep");
+}

@@ -22,29 +22,11 @@ static string MmcifCellString(const char *p, idx_t len, bool is_null) {
 	return string(p, len);
 }
 
-static bool MmcifOnlyWhitespace(const char *base, idx_t from, idx_t to) {
-	for (idx_t i = from; i < to; i++) {
-		if (!isspace(static_cast<unsigned char>(base[i]))) {
-			return false;
-		}
-	}
-	return true;
-}
-
 // Whole-line span of a key-value row: from the line holding the tag of its
-// first value through the line its last value ends on. The tag shares the
-// value's line, or sits alone on the line above a value written on its own line
-// (a
-// ';' text field), so cutting the row removes tags and values together.
-static MmcifRowSpan MmcifRowSpanFor(const char *base, idx_t size, idx_t first_off, idx_t last_end) {
-	MmcifRowSpan rs;
-	idx_t line_start = MmcifLineStart(base, first_off);
-	if (MmcifOnlyWhitespace(base, line_start, first_off) && line_start > 0) {
-		line_start = MmcifLineStart(base, line_start - 1);
-	}
-	rs.start = line_start;
-	rs.end = MmcifLineEnd(base, size, last_end);
-	return rs;
+// first item through the line its last value ends on. Values may be separated
+// from their tags by any number of comment or blank lines.
+static MmcifRowSpan MmcifRowSpanFor(const char *base, idx_t size, idx_t first_tag, idx_t last_end) {
+	return MmcifRowSpan {MmcifLineStart(base, first_tag), MmcifLineEnd(base, size, last_end)};
 }
 
 shared_ptr<MmcifWriteStore> MmcifIndex::Materialize() {
@@ -107,8 +89,8 @@ shared_ptr<MmcifWriteStore> MmcifIndex::Materialize() {
 			for (auto &sc : cat->singles) {
 				full[sc.col] = MmcifCellString(content_data + sc.off, sc.len, sc.is_null);
 				spans[sc.col] = MmcifCellSpan {sc.off, sc.len, false};
-				if (!any || sc.off < row_first) {
-					row_first = sc.off;
+				if (!any || sc.tag_off < row_first) {
+					row_first = sc.tag_off;
 					any = true;
 				}
 				if (sc.off + sc.len > row_last) {
