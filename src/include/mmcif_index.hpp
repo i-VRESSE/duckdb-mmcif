@@ -201,6 +201,8 @@ inline void MmcifUnquote(const char *&p, idx_t &len) {
 
 struct MmcifSingleCell {
 	idx_t col; // full column index into columns
+	idx_t tag_off; // start of the item's tag
+	idx_t tag_end; // end of the item's tag (exclusive)
 	idx_t off; // offset of the value in the decompressed buffer
 	idx_t len; // length of the value
 	bool is_null;

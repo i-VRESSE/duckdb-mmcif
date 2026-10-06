@@ -243,6 +243,8 @@ void MmcifIndex::Build() {
 					}
 					MmcifSingleCell cell;
 					cell.col = column_index(item);
+					cell.tag_off = s;
+					cell.tag_end = tag_end;
 					// The value follows the tag on its line or on a later one (wwPDB
 					// writes long values, quoted or as a ';' text field, below the tag).
 					const char *out;

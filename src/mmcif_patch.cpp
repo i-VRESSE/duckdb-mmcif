@@ -343,6 +343,38 @@ string MmcifPatch::Apply(const MmcifWriteStore &store) {
 		// Deleted rows: cut them out of the source.
 		AddDeletionEdits(cat, src, size, edits);
 
+		// Multiple rows require a loop, even when the source used item/value pairs.
+		bool promote_to_loop = !cat.is_loop && cat.rows.size() > 1;
+		bool has_original = !cat.rows.empty() && !IsInsertedRow(cat, 0);
+		auto loop_header = [&](const string &eol) {
+			string header = "loop_" + eol;
+			for (auto &column : cat.columns) {
+				header += "_" + cat.name + "." + column + eol;
+			}
+			return header;
+		};
+		if (promote_to_loop && has_original) {
+			auto first_tag = source->singles.front().tag_off;
+			edits.push_back(PatchEdit {first_tag, first_tag, loop_header(MmcifPatchEolAt(src, size, first_tag))});
+			// Keep the original values and comments; only the item tags move into the header.
+			for (auto &cell : source->singles) {
+				idx_t tag_end = cell.tag_end;
+				if (cell.len != 0 && cell.off >= MmcifLineEnd(src, size, cell.tag_off)) {
+					// A tag on its own line must not become a blank line inside the loop.
+					while (tag_end < size && MmcifPatchBlank(src[tag_end])) {
+						tag_end++;
+					}
+					if (tag_end < size && src[tag_end] == '\n') {
+						tag_end++;
+					}
+				}
+				edits.push_back(PatchEdit {cell.tag_off, tag_end, string()});
+				if (cell.len == 0 && !cat.cell_spans[0][cell.col].edited) {
+					edits.push_back(PatchEdit {cell.off, cell.off, " ?"});
+				}
+			}
+		}
+
 		// Updated cells: replace exactly the bytes of the old value.
 		for (idx_t r = 0; r < cat.rows.size(); r++) {
 			if (IsInsertedRow(cat, r)) {
@@ -387,8 +419,12 @@ string MmcifPatch::Apply(const MmcifWriteStore &store) {
 				if (src[insert_at - 1] != '\n') {
 					inserted = eol; // the source's last line has no newline
 				}
+				if (promote_to_loop && !has_original) {
+					inserted += loop_header(eol);
+				}
 			}
-			inserted += cat.is_loop ? FormatLoopRow(cat, cat.rows[r], eol) : FormatItemRow(cat, cat.rows[r], eol);
+			inserted += (cat.is_loop || promote_to_loop) ? FormatLoopRow(cat, cat.rows[r], eol)
+			                                           : FormatItemRow(cat, cat.rows[r], eol);
 		}
 		if (!inserted.empty()) {
 			edits.push_back(PatchEdit {insert_at, insert_at, std::move(inserted)});
