@@ -67,13 +67,18 @@ static bool MmcifOnlyWhitespace(const char *base, idx_t from, idx_t to) {
 	return true;
 }
 
-// Whole-line span covering [first_off, last_end). Extended back to the start of
-// the first line when only whitespace precedes the cell there, so cutting the
-// row out of the file leaves no stray blank line behind.
+// Whole-line span of a key-value row: from the line holding the tag of its
+// first value through the line its last value ends on. The tag shares the
+// value's line, or sits alone on the line above a value written on its own line
+// (a
+// ';' text field), so cutting the row removes tags and values together.
 static MmcifRowSpan MmcifRowSpanFor(const char *base, idx_t size, idx_t first_off, idx_t last_end) {
 	MmcifRowSpan rs;
 	idx_t line_start = MmcifLineStart(base, first_off);
-	rs.start = MmcifOnlyWhitespace(base, line_start, first_off) ? line_start : first_off;
+	if (MmcifOnlyWhitespace(base, line_start, first_off) && line_start > 0) {
+		line_start = MmcifLineStart(base, line_start - 1);
+	}
+	rs.start = line_start;
 	rs.end = MmcifLineEnd(base, size, last_end);
 	return rs;
 }
@@ -117,7 +122,7 @@ shared_ptr<MmcifWriteStore> MmcifIndex::Materialize() {
 						full[cat->loop_col_map[i]] = std::move(row[i]);
 					}
 					wc.rows.push_back(std::move(full));
-					wc.row_spans.push_back(MmcifRowSpanFor(content_data, original_text_size, row_first, row_last));
+					wc.row_spans.push_back(MmcifRowSpan {row_first, row_last});
 					wc.cell_spans.push_back(std::move(spans));
 					spans.assign(ncols, MmcifCellSpan {});
 					row.assign(loop_ncols, "");
@@ -131,7 +136,7 @@ shared_ptr<MmcifWriteStore> MmcifIndex::Materialize() {
 					full[cat->loop_col_map[i]] = std::move(row[i]);
 				}
 				wc.rows.push_back(std::move(full));
-				wc.row_spans.push_back(MmcifRowSpanFor(content_data, original_text_size, row_first, row_last));
+				wc.row_spans.push_back(MmcifRowSpan {row_first, row_last});
 				wc.cell_spans.push_back(std::move(spans));
 			}
 		} else {

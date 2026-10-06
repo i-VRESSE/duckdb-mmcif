@@ -222,7 +222,10 @@ from (`MmcifRowSpan` / `MmcifCellSpan` in `mmcif_write_store.hpp`) and
 original bytes:
 
 - **UPDATE** replaces exactly the bytes of the old value.
-- **DELETE** cuts out the deleted row's whole lines.
+- **DELETE** cuts out the deleted row's whole lines. Loop rows are a token
+  stream, so several rows may share a line: then only the row's own values and
+  one separator are cut, and the surviving rows on that line stay put. Adjacent
+  deleted rows are cut as one run, so emptying a shared line removes it whole.
 - **INSERT** generates the new row and splices it in after the category's last
   original row.
 - Everything else is copied through verbatim.

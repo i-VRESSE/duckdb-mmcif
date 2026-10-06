@@ -167,7 +167,9 @@ TEST_CASE("MmcifValueCursor reads ;...; multi-line values", "[mmcif][cursor]") {
 // MmcifIndex::Build / Materialize edge cases
 // ---------------------------------------------------------------------------
 
-TEST_CASE("MmcifIndex indexes loop + single-tag, decodes values, keeps first data block", "[mmcif][index]") {
+TEST_CASE("MmcifIndex indexes loop + single-tag, decodes values, keeps first "
+          "data block",
+          "[mmcif][index]") {
 	std::string cif = "data_testblock\n"
 	                  "loop_\n"
 	                  "_foo.a\n"
@@ -682,7 +684,8 @@ TEST_CASE("MmcifWriteCif drops the comments of a category with no rows left", "[
 	store.comments.push_back(MakeComment(MmcifCommentAnchor::CATEGORY, "gone", "", 0, "# note about gone"));
 
 	auto out = WriteToString(store);
-	// writeEmptyTables=false: the category is not written, so its comments go with it.
+	// writeEmptyTables=false: the category is not written, so its comments go
+	// with it.
 	REQUIRE(out.find("gone") == std::string::npos);
 }
 
@@ -716,8 +719,8 @@ TEST_CASE("MmcifFile::Read returns empty content for a missing local file", "[mm
 
 // ---------------------------------------------------------------------------
 // MmcifPatch: surgical write-back. The point of these tests is that the patched
-// text equals the original everywhere except where the transaction changed data,
-// so they assert whole-file equality rather than substrings.
+// text equals the original everywhere except where the transaction changed
+// data, so they assert whole-file equality rather than substrings.
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -776,6 +779,64 @@ TEST_CASE("MmcifPatch cuts a deleted row out cleanly", "[mmcif][patch]") {
 	                       "2 beta\n"
 	                       "# trailing comment\n";
 	REQUIRE(MmcifPatch::Apply(*store) == expected);
+}
+
+// mmCIF loop rows are a flat token stream, so several rows may share one line.
+static const char *PATCH_SHARED_SRC = "data_t\n"
+                                      "loop_\n"
+                                      "_c.x\n"
+                                      "_c.y\n"
+                                      "  1 2 3 4\n"
+                                      "5 6\n";
+
+static std::string PatchDeleteShared(const std::string &name, const std::vector<unsigned int> &rows) {
+	TempCif cif(name, PATCH_SHARED_SRC);
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("c");
+	REQUIRE(cat != nullptr);
+	store->DeleteRows(*cat, rows);
+	return MmcifPatch::Apply(*store);
+}
+
+TEST_CASE("MmcifPatch deletes only its own row from a line shared with other rows", "[mmcif][patch]") {
+	const std::string head = "data_t\nloop_\n_c.x\n_c.y\n";
+	// First row on the line: the indentation stays, the next row moves up.
+	REQUIRE(PatchDeleteShared("mmcif_patch_shared_first.cif", {0}) == head + "  3 4\n5 6\n");
+	// Last row on the line: the separator in front of it goes with it.
+	REQUIRE(PatchDeleteShared("mmcif_patch_shared_last.cif", {1}) == head + "  1 2\n5 6\n");
+	// Every row on the line: the whole line goes, no blank line is left.
+	REQUIRE(PatchDeleteShared("mmcif_patch_shared_both.cif", {0, 1}) == head + "5 6\n");
+	// A run of deleted rows that starts mid-line and ends on the next line.
+	REQUIRE(PatchDeleteShared("mmcif_patch_shared_span.cif", {1, 2}) == head + "  1 2\n");
+	REQUIRE(PatchDeleteShared("mmcif_patch_shared_all.cif", {0, 1, 2}) == head);
+}
+
+TEST_CASE("MmcifPatch keeps a comment between two deleted rows", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_delete_comment.cif", "data_t\nloop_\n_c.x\nA\n# about B\nB\nC\n");
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("c");
+	REQUIRE(cat != nullptr);
+	store->DeleteRows(*cat, {0, 1});
+	REQUIRE(MmcifPatch::Apply(*store) == "data_t\nloop_\n_c.x\n# about B\nC\n");
+}
+
+TEST_CASE("MmcifPatch deletes a key-value row with its tags", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_delete_single.cif",
+	            "data_t\n#\n_entry.title\n;a long\ntitle\n;\n_entry.id B\n#\n_x.y 1\n");
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("entry");
+	REQUIRE(cat != nullptr);
+	store->DeleteRows(*cat, {0});
+	REQUIRE(MmcifPatch::Apply(*store) == "data_t\n#\n#\n_x.y 1\n");
+}
+
+TEST_CASE("MmcifPatch inserts after a line holding several rows", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_shared_insert.cif", "data_t\nloop_\n_c.x\n_c.y\n1 2 3 4\n# end\n");
+	auto store = PatchFixture(cif);
+	auto *cat = store->FindCategory("c");
+	REQUIRE(cat != nullptr);
+	store->AddRow(*cat, {"5", "6"});
+	REQUIRE(MmcifPatch::Apply(*store) == "data_t\nloop_\n_c.x\n_c.y\n1 2 3 4\n5 6\n# end\n");
 }
 
 TEST_CASE("MmcifPatch splices an inserted row in after the last original row", "[mmcif][patch]") {

@@ -13,7 +13,8 @@
 // MmcifCellSpan), which is what makes this possible:
 //
 //   UPDATE  replace exactly the bytes of the old value
-//   DELETE  cut out the deleted row's whole lines
+//   DELETE  cut out the deleted row's whole lines, or only its own values
+//           and one separator when other rows share its line
 //   INSERT  generate the new row and splice it in after the category's
 //           last original row
 //

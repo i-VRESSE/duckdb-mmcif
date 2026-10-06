@@ -169,9 +169,9 @@ void EmitValue(PatchLine &line, const string &value, const string &item) {
 	if (multiple_line) {
 		// A text field cannot contain a line that starts with ';'.
 		if (value[0] == ';' || value.find("\n;") != string::npos) {
-			throw IOException(
-			    "mmcif: cannot write value of '%s' - a text field cannot contain a line starting with ';'",
-			    item.c_str());
+			throw IOException("mmcif: cannot write value of '%s' - a text field "
+			                  "cannot contain a line starting with ';'",
+			                  item.c_str());
 		}
 		line.TextBlock(value);
 		return;
@@ -184,10 +184,10 @@ void EmitValue(PatchLine &line, const string &value, const string &item) {
 	line.Token(quote + value + quote);
 }
 
-// Where a category's new rows go: right after its last original row (deleted
-// rows count, so re-inserting after a delete lands in the same place), falling
-// back to the category's source data region.
-idx_t InsertionPoint(const MmcifWriteCategory &cat, MmcifCategory &source) {
+// Where a category's new rows go: at the start of the line after its last
+// original row (deleted rows count, so re-inserting after a delete lands in the
+// same place), falling back to the category's source data region.
+idx_t InsertionPoint(const MmcifWriteCategory &cat, MmcifCategory &source, const char *src, idx_t size) {
 	idx_t at = 0;
 	for (auto &rs : cat.row_spans) {
 		if (rs.start != MMCIF_NO_SPAN && rs.end > at) {
@@ -205,7 +205,75 @@ idx_t InsertionPoint(const MmcifWriteCategory &cat, MmcifCategory &source) {
 	if (at == 0) {
 		throw IOException("mmcif: cannot find where to insert rows into category '%s'", cat.name.c_str());
 	}
+	// A loop row span ends at its last value, possibly mid-line: finish the line.
+	while (at < size && src[at - 1] != '\n') {
+		at++;
+	}
 	return at;
+}
+
+static bool MmcifPatchBlank(char c) {
+	return c == ' ' || c == '\t' || c == '\r';
+}
+
+// Source bytes to cut for the deleted rows of one category. Adjacent deleted
+// rows (only whitespace between them) are cut as one run. A run that leaves
+// nothing but whitespace on its lines takes those whole lines; otherwise it
+// shares a line with surviving rows and takes just one separator with it, so
+// the remaining rows keep their layout and no blank line is left behind.
+std::vector<PatchEdit> DeletionEdits(const MmcifWriteCategory &cat, const char *src, idx_t size) {
+	std::vector<MmcifRowSpan> spans;
+	for (auto &d : cat.deleted_rows) {
+		if (d.end > d.start) {
+			spans.push_back(d);
+		}
+	}
+	std::sort(spans.begin(), spans.end(),
+	          [](const MmcifRowSpan &a, const MmcifRowSpan &b) { return a.start < b.start; });
+	std::vector<MmcifRowSpan> runs;
+	for (auto &s : spans) {
+		if (!runs.empty()) {
+			auto &last = runs.back();
+			idx_t gap = last.end;
+			while (gap < s.start && isspace(static_cast<unsigned char>(src[gap]))) {
+				gap++;
+			}
+			if (gap >= s.start) {
+				last.end = MaxValue(last.end, s.end);
+				continue;
+			}
+		}
+		runs.push_back(s);
+	}
+
+	std::vector<PatchEdit> edits;
+	for (auto &run : runs) {
+		idx_t line_start = run.start;
+		while (line_start > 0 && MmcifPatchBlank(src[line_start - 1])) {
+			line_start--;
+		}
+		bool starts_line = line_start == 0 || src[line_start - 1] == '\n';
+		idx_t after = run.end;
+		if (after == 0 || src[after - 1] != '\n') {
+			while (after < size && MmcifPatchBlank(src[after])) {
+				after++;
+			}
+		}
+		bool ends_line = after >= size || src[after] == '\n' || src[after - 1] == '\n';
+		if (starts_line && ends_line) {
+			if (after < size && src[after] == '\n') {
+				after++;
+			}
+			edits.push_back(PatchEdit {line_start, after, string()});
+		} else if (starts_line) {
+			// Rows follow on the same line: keep the indentation, take the gap.
+			edits.push_back(PatchEdit {run.start, after, string()});
+		} else {
+			// Rows precede on the same line: take the gap in front.
+			edits.push_back(PatchEdit {line_start, run.end, string()});
+		}
+	}
+	return edits;
 }
 
 bool IsInsertedRow(const MmcifWriteCategory &cat, idx_t row) {
@@ -254,16 +322,14 @@ string MmcifPatch::Apply(const MmcifWriteStore &store) {
 	for (auto &cat : store.categories) {
 		MmcifCategory *source = store.SourceCategory(cat.name);
 		if (!source) {
-			throw IOException("mmcif: cannot write back category '%s' - it is not in the source file",
+			throw IOException("mmcif: cannot write back category '%s' - it is not in "
+			                  "the source file",
 			                  cat.name.c_str());
 		}
 
-		// Deleted rows: cut their whole lines out of the source.
-		for (auto &d : cat.deleted_rows) {
-			if (d.end > d.start) {
-				edits.push_back(PatchEdit {d.start, d.end, string()});
-			}
-		}
+		// Deleted rows: cut them out of the source.
+		auto deletions = DeletionEdits(cat, src, size);
+		edits.insert(edits.end(), deletions.begin(), deletions.end());
 
 		// Updated cells: replace exactly the bytes of the old value.
 		for (idx_t r = 0; r < cat.rows.size(); r++) {
@@ -279,7 +345,8 @@ string MmcifPatch::Apply(const MmcifWriteStore &store) {
 					continue;
 				}
 				if (span.off == MMCIF_NO_SPAN) {
-					throw IOException("mmcif: cannot write back %s.%s - the item has no position in the source file",
+					throw IOException("mmcif: cannot write back %s.%s - the item has no "
+					                  "position in the source file",
 					                  cat.name.c_str(), c < cat.columns.size() ? cat.columns[c].c_str() : "?");
 				}
 				PatchLine line(MmcifPatchColumnOf(src, span.off), MmcifPatchEolAt(src, size, span.off));
@@ -299,7 +366,7 @@ string MmcifPatch::Apply(const MmcifWriteStore &store) {
 			}
 		}
 		if (has_inserts) {
-			idx_t insert_at = InsertionPoint(cat, *source);
+			idx_t insert_at = InsertionPoint(cat, *source, src, size);
 			string eol = MmcifPatchEolBefore(src, insert_at);
 			string inserted;
 			for (idx_t r = 0; r < cat.rows.size(); r++) {

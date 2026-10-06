@@ -47,8 +47,11 @@ struct MmcifCellSpan {
 	}
 };
 
-// Byte span of one row as it is written in the source file: whole lines,
-// including the terminating newline, so a DELETE cuts the row out cleanly.
+// Byte span of one row as it is written in the source file. A loop row spans
+// exactly its own tokens, first value through last (quotes and text fields
+// included), because loop rows are a token stream and several may share one
+// line; the write-back widens a deleted run of rows to whole lines or a
+// separator. A key-value row spans the whole lines its values are written on.
 struct MmcifRowSpan {
 	idx_t start;
 	idx_t end;
