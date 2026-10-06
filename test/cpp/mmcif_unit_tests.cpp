@@ -663,7 +663,8 @@ TEST_CASE("MmcifPatch keeps a CRLF file's line ending convention", "[mmcif][patc
 }
 
 TEST_CASE("MmcifPatch promotes item/value categories to loops when inserting rows", "[mmcif][patch]") {
-	TempCif cif("mmcif_patch_promote.cif", "data_t\n_entry.id original\n\n# keep\n_entry.note\n;long\nnote\n;\n_entry.empty\n");
+	TempCif cif("mmcif_patch_promote.cif",
+	            "data_t\n_entry.id original\n\n# keep\n_entry.note\n;long\nnote\n;\n_entry.empty\n");
 	auto store = PatchFixture(cif);
 	auto *cat = store->FindCategory("entry");
 	store->AddRow(*cat, {"added", "new note", "present"});
@@ -717,7 +718,8 @@ TEST_CASE("MmcifPatch inserts into an empty loop after deleting all rows and rel
 }
 
 TEST_CASE("MmcifPatch deletes tags separated from their values by comments and blank lines", "[mmcif][patch]") {
-	TempCif cif("mmcif_patch_nextline_delete.cif", "data_t\n_entry.id\n# between tag and value\n\noriginal\n_other.id keep\n");
+	TempCif cif("mmcif_patch_nextline_delete.cif",
+	            "data_t\n_entry.id\n# between tag and value\n\noriginal\n_other.id keep\n");
 	auto store = PatchFixture(cif);
 	store->DeleteRows(*store->FindCategory("entry"), {0});
 	auto text = MmcifPatch::Apply(*store);
@@ -731,19 +733,18 @@ TEST_CASE("MmcifPatch deletes tags separated from their values by comments and b
 
 TEST_CASE("MmcifPatch preserves comments inside deleted loop and key-value rows", "[mmcif][patch]") {
 	for (const auto &eol : {std::string("\n"), std::string("\r\n")}) {
-		TempCif loop("mmcif_patch_delete_inner_loop_comment.cif",
-		             "data_t" + eol + "loop_" + eol + "_entry.id" + eol + "_entry.note" + eol +
-		                 "A" + eol + "# inside row" + eol + "B" + eol + "C D" + eol);
+		TempCif loop("mmcif_patch_delete_inner_loop_comment.cif", "data_t" + eol + "loop_" + eol + "_entry.id" + eol +
+		                                                              "_entry.note" + eol + "A" + eol + "# inside row" +
+		                                                              eol + "B" + eol + "C D" + eol);
 		auto loop_store = PatchFixture(loop);
 		loop_store->DeleteRows(*loop_store->FindCategory("entry"), {0});
-		REQUIRE(MmcifPatch::Apply(*loop_store) ==
-		        "data_t" + eol + "loop_" + eol + "_entry.id" + eol + "_entry.note" + eol +
-		            "# inside row" + eol + "C D" + eol);
+		REQUIRE(MmcifPatch::Apply(*loop_store) == "data_t" + eol + "loop_" + eol + "_entry.id" + eol + "_entry.note" +
+		                                              eol + "# inside row" + eol + "C D" + eol);
 
 		TempCif single("mmcif_patch_delete_inner_single_comment.cif",
-		               "data_t" + eol + "_entry.id" + eol + "# before value" + eol + "A" + eol +
-		                   "# between items" + eol + "_entry.note" + eol + ";body" + eol + "# part of value" +
-		                   eol + ";" + eol + "_other.id keep" + eol);
+		               "data_t" + eol + "_entry.id" + eol + "# before value" + eol + "A" + eol + "# between items" +
+		                   eol + "_entry.note" + eol + ";body" + eol + "# part of value" + eol + ";" + eol +
+		                   "_other.id keep" + eol);
 		auto single_store = PatchFixture(single);
 		single_store->DeleteRows(*single_store->FindCategory("entry"), {0});
 		REQUIRE(MmcifPatch::Apply(*single_store) ==

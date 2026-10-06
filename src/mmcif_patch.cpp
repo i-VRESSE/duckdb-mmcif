@@ -421,7 +421,7 @@ string MmcifPatch::Apply(const MmcifWriteStore &store) {
 				}
 			}
 			inserted += (cat.is_loop || promote_to_loop) ? FormatLoopRow(cat, cat.rows[r], eol)
-			                                           : FormatItemRow(cat, cat.rows[r], eol);
+			                                             : FormatItemRow(cat, cat.rows[r], eol);
 		}
 		if (!inserted.empty()) {
 			edits.push_back(PatchEdit {insert_at, insert_at, std::move(inserted)});
