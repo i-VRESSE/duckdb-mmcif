@@ -4,18 +4,24 @@
 #include "duckdb/common/gzip_file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 
-#include <fstream>
 #include <string>
 
 #include "mmcif_file.hpp"
+
+#ifdef _WIN32
+#include "duckdb/common/windows.hpp"
+#include "duckdb/common/windows_util.hpp"
+#else
+#include <sys/stat.h>
+#endif
 
 namespace duckdb {
 
 // ---------------------------------------------------------------------------
 // Process-level cache (recommendation 2): keyed by path, re-attaching the same
 // file in one DuckDB session reuses the decompressed content and the pass-1
-// index. Local files are invalidated when mtime/size change; remote paths are
-// cached by path only (may be stale).
+// index. Local files are invalidated when their stamp (see MmcifFileStampKey)
+// changes; remote paths are cached by path only (may be stale).
 // ---------------------------------------------------------------------------
 
 static mutex g_index_cache_lock;
@@ -26,9 +32,53 @@ static unordered_map<string, weak_ptr<MmcifIndex>> g_index_cache;
 static mutex g_stamp_lock;
 static case_insensitive_map_t<string> g_stamps;
 
+// Context-free stamp of a local file: identity (device/inode or volume/file
+// index), size, and sub-second modification and change times. The change time
+// also moves when mtime is restored, so a same-size rewrite within the mtime
+// granularity (or an atomic rename over the path) still changes the stamp.
+// Returns "" when the file cannot be stat'd.
+static string MmcifLocalFileStamp(const string &path) {
+#ifdef _WIN32
+	auto wpath = WindowsUtil::UTF8ToUnicode(path.c_str());
+	HANDLE handle =
+	    CreateFileW(wpath.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+	                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (handle == INVALID_HANDLE_VALUE) {
+		return "";
+	}
+	BY_HANDLE_FILE_INFORMATION info;
+	FILE_BASIC_INFO basic;
+	bool ok = GetFileInformationByHandle(handle, &info) &&
+	          GetFileInformationByHandleEx(handle, FileBasicInfo, &basic, sizeof(basic));
+	CloseHandle(handle);
+	if (!ok) {
+		return "";
+	}
+	return StringUtil::Format("%s|win|%llu|%llu|%llu|%lld|%lld", path, (unsigned long long)info.dwVolumeSerialNumber,
+	                          ((unsigned long long)info.nFileIndexHigh << 32) | info.nFileIndexLow,
+	                          ((unsigned long long)info.nFileSizeHigh << 32) | info.nFileSizeLow,
+	                          (long long)basic.LastWriteTime.QuadPart, (long long)basic.ChangeTime.QuadPart);
+#else
+	struct stat st;
+	if (stat(path.c_str(), &st) != 0) {
+		return "";
+	}
+#ifdef __APPLE__
+	auto mtime_ns = (long long)st.st_mtimespec.tv_nsec;
+	auto ctime_ns = (long long)st.st_ctimespec.tv_nsec;
+#else
+	auto mtime_ns = (long long)st.st_mtim.tv_nsec;
+	auto ctime_ns = (long long)st.st_ctim.tv_nsec;
+#endif
+	return StringUtil::Format("%s|posix|%llu|%llu|%lld|%lld.%lld|%lld.%lld", path, (unsigned long long)st.st_dev,
+	                          (unsigned long long)st.st_ino, (long long)st.st_size, (long long)st.st_mtime, mtime_ns,
+	                          (long long)st.st_ctime, ctime_ns);
+#endif
+}
+
 // Stamp a local file. Returns "" when the file is missing (treated as
 // "changed"). With a context the stamp comes from DuckDB's VFS (mtime+size);
-// without one (write-mode loads) a context-free size-only stat is used.
+// without one (write-mode loads) a direct OS stat is used.
 static string MmcifFileStampKey(const string &path, optional_ptr<ClientContext> context) {
 	if (context) {
 		auto &fs = FileSystem::GetFileSystem(*context);
@@ -40,16 +90,12 @@ static string MmcifFileStampKey(const string &path, optional_ptr<ClientContext> 
 		auto size = fs.GetFileSize(*handle);
 		return StringUtil::Format("%s|%ld|%lld", path, (long)mtime.value, (long long)size);
 	}
-	std::ifstream in(path.c_str(), std::ios::binary | std::ios::ate);
-	if (!in) {
-		return "";
-	}
-	auto end = in.tellg();
-	return StringUtil::Format("%s|size|%lld", path, (long long)end);
+	return MmcifLocalFileStamp(path);
 }
 
-// Local-file staleness check: stamp changed since the cached copy. Remote
-// paths cannot be cheaply stat'd and are cached by path only (may be stale).
+// Local-file staleness check: stamp differs from the one recorded when the
+// cached copy was loaded. Remote paths cannot be cheaply stat'd and are cached
+// by path only (may be stale).
 static bool MmcifFileChanged(const string &path, optional_ptr<ClientContext> context) {
 	if (MmcifFile::IsRemotePath(path)) {
 		return false;
@@ -60,11 +106,7 @@ static bool MmcifFileChanged(const string &path, optional_ptr<ClientContext> con
 	}
 	lock_guard<mutex> l(g_stamp_lock);
 	auto it = g_stamps.find(path);
-	if (it != g_stamps.end() && it->second == key) {
-		return false;
-	}
-	g_stamps[path] = key;
-	return true;
+	return it == g_stamps.end() || it->second != key;
 }
 
 shared_ptr<MmcifIndex> MmcifIndex::Load(const string &path, optional_ptr<ClientContext> context) {
@@ -79,6 +121,9 @@ shared_ptr<MmcifIndex> MmcifIndex::Load(const string &path, optional_ptr<ClientC
 		}
 	}
 
+	// Stamp before reading: a write racing the read then leaves a stamp that no
+	// longer matches, so the next Load re-reads instead of trusting this copy.
+	string stamp = MmcifFile::IsRemotePath(path) ? string() : MmcifFileStampKey(path, context);
 	string raw = MmcifFile::Read(path, context);
 	string text;
 	bool is_gzip = GZipFileSystem::CheckIsZip(raw.data(), raw.size());
@@ -97,6 +142,12 @@ shared_ptr<MmcifIndex> MmcifIndex::Load(const string &path, optional_ptr<ClientC
 
 	lock_guard<mutex> l(g_index_cache_lock);
 	g_index_cache[path] = weak_ptr<MmcifIndex>(index);
+	lock_guard<mutex> sl(g_stamp_lock);
+	if (stamp.empty()) {
+		g_stamps.erase(path);
+	} else {
+		g_stamps[path] = stamp;
+	}
 	return index;
 }
 
