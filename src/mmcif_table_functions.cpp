@@ -95,8 +95,6 @@ static unique_ptr<FunctionData> MmcifBind(ClientContext &context, TableFunctionB
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto table_name = input.inputs[1].GetValue<string>();
 	auto result = make_uniq<MmcifBindData>();
-	result->file_name = file_name;
-	result->table_name = table_name;
 
 	MmcifBindIndex(*result, MmcifIndex::Load(file_name, &context), table_name);
 	names.assign(result->column_names.begin(), result->column_names.end());
@@ -263,12 +261,10 @@ struct MmcifMetaBindData : public FunctionData {
 };
 
 struct MmcifMetaGlobalState : public GlobalTableFunctionState {
-	MmcifMetaGlobalState(const MmcifMetaBindData &bind_p, const vector<column_t> &column_ids_p)
-	    : bind(bind_p), column_ids(column_ids_p), position(0) {
+	explicit MmcifMetaGlobalState(const vector<column_t> &column_ids_p) : column_ids(column_ids_p) {
 	}
-	const MmcifMetaBindData &bind;
 	vector<column_t> column_ids;
-	idx_t position;
+	idx_t position = 0;
 
 	idx_t MaxThreads() const override {
 		return 1;
@@ -276,25 +272,18 @@ struct MmcifMetaGlobalState : public GlobalTableFunctionState {
 };
 
 static unique_ptr<GlobalTableFunctionState> MmcifMetaInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
-	auto &bind = input.bind_data->Cast<MmcifMetaBindData>();
-	return make_uniq<MmcifMetaGlobalState>(bind, input.column_ids);
+	return make_uniq<MmcifMetaGlobalState>(input.column_ids);
 }
 
 static void MmcifMetaScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &gstate = data.global_state->Cast<MmcifMetaGlobalState>();
-	auto &bind = gstate.bind;
-	idx_t row = gstate.position;
+	auto &rows = data.bind_data->Cast<MmcifMetaBindData>().rows;
 	idx_t count = 0;
-	while (row < bind.rows.size() && count < STANDARD_VECTOR_SIZE) {
-		const auto &r = bind.rows[row];
+	for (; gstate.position < rows.size() && count < STANDARD_VECTOR_SIZE; gstate.position++, count++) {
 		for (idx_t c = 0; c < output.ColumnCount(); c++) {
-			auto col_id = gstate.column_ids[c];
-			output.data[c].SetValue(count, r[col_id]);
+			output.data[c].SetValue(count, rows[gstate.position][gstate.column_ids[c]]);
 		}
-		row++;
-		count++;
 	}
-	gstate.position = row;
 	output.SetCardinality(count);
 }
 
@@ -320,11 +309,11 @@ static unique_ptr<FunctionData> MmcifColumnsBind(ClientContext &context, TableFu
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto result = make_uniq<MmcifMetaBindData>();
 	auto index = MmcifIndex::Load(file_name, &context);
+	auto &dictionary = DictionaryIndex::Get();
 	for (auto &cat : index->GetCategories()) {
 		auto &category = cat->name;
 		for (idx_t column_index = 0; column_index < cat->columns.size(); column_index++) {
 			auto &col = cat->columns[column_index];
-			auto &dictionary = DictionaryIndex::Get();
 			auto type = dictionary.LookupType(category, col);
 			vector<Value> row = {Value(category), Value(col), Value::INTEGER(NumericCast<int32_t>(column_index + 1)),
 			                     Value(dictionary.GetItemUrl(category, col)), Value(type.ToString())};

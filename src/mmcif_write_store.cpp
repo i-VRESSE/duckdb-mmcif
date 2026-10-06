@@ -41,22 +41,6 @@ static string MmcifDecodeValue(const char *p, idx_t len) {
 	return string(p, len);
 }
 
-// Line boundaries around a byte offset in the source buffer.
-static idx_t MmcifLineStart(const char *base, idx_t pos) {
-	while (pos > 0 && base[pos - 1] != '\n') {
-		pos--;
-	}
-	return pos;
-}
-
-static idx_t MmcifLineEnd(const char *base, idx_t size, idx_t pos) {
-	idx_t p = pos;
-	while (p < size && base[p] != '\n') {
-		p++;
-	}
-	return p < size ? p + 1 : size;
-}
-
 static bool MmcifOnlyWhitespace(const char *base, idx_t from, idx_t to) {
 	for (idx_t i = from; i < to; i++) {
 		if (!isspace(static_cast<unsigned char>(base[i]))) {

@@ -29,6 +29,22 @@
 
 namespace duckdb {
 
+// Start of the line holding byte `pos`.
+inline idx_t MmcifLineStart(const char *base, idx_t pos) {
+	while (pos > 0 && base[pos - 1] != '\n') {
+		pos--;
+	}
+	return pos;
+}
+
+// Start of the line after the one holding byte `pos` (or `size`).
+inline idx_t MmcifLineEnd(const char *base, idx_t size, idx_t pos) {
+	while (pos < size && base[pos] != '\n') {
+		pos++;
+	}
+	return pos < size ? pos + 1 : size;
+}
+
 // ---------------------------------------------------------------------------
 // MmcifValueCursor: reads mmCIF data values sequentially from a byte range of
 // the decompressed buffer (row-major loop data). Handles plain tokens, single

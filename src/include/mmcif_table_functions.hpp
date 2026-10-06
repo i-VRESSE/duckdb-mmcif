@@ -23,8 +23,6 @@ namespace duckdb {
 class ExtensionLoader;
 
 struct MmcifBindData : public FunctionData {
-	string file_name;
-	string table_name;
 	std::vector<string> column_names;
 	std::vector<LogicalType> column_types;
 	// Read-only path: a shared lazy index + category. Rows

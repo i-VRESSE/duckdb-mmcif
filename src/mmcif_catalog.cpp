@@ -111,7 +111,7 @@ public:
 
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override {
 		auto &gstate = input.global_state.Cast<MmcifWriteGlobalState>();
-		auto store = catalog.GetWriteStore();
+		auto &store = catalog.write_store;
 		auto cat = MmcifGetWriteCategory(*store, table_name);
 		idx_t num_cols = cat->columns.size();
 		chunk.Flatten();
@@ -163,7 +163,7 @@ public:
 		sort(indices.begin(), indices.end());
 		indices.erase(unique(indices.begin(), indices.end()), indices.end());
 		if (!indices.empty()) {
-			auto store = catalog.GetWriteStore();
+			auto &store = catalog.write_store;
 			auto cat = MmcifGetWriteCategory(*store, table_name);
 			store->DeleteRows(*cat, indices);
 			gstate.count += indices.size();
@@ -186,7 +186,7 @@ public:
 
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override {
 		auto &gstate = input.global_state.Cast<MmcifWriteGlobalState>();
-		auto store = catalog.GetWriteStore();
+		auto &store = catalog.write_store;
 		auto cat = MmcifGetWriteCategory(*store, table_name);
 		chunk.Flatten();
 		auto &row_ids = chunk.data[chunk.ColumnCount() - 1];
@@ -207,9 +207,8 @@ public:
 // ---------------------------------------------------------------------------
 
 MmcifTableEntry::MmcifTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info,
-                                 string file_name_p, string table_name_p, MmcifCatalog *catalog_p)
-    : TableCatalogEntry(catalog, schema, info), file_name(std::move(file_name_p)), table_name(std::move(table_name_p)),
-      catalog(catalog_p) {
+                                 string table_name_p, MmcifCatalog *catalog_p)
+    : TableCatalogEntry(catalog, schema, info), table_name(std::move(table_name_p)), catalog(catalog_p) {
 }
 
 unique_ptr<BaseStatistics> MmcifTableEntry::GetStatistics(ClientContext &context, column_t column_id) {
@@ -221,13 +220,11 @@ unique_ptr<BaseStatistics> MmcifTableEntry::GetStatistics(ClientContext &context
 
 TableFunction MmcifTableEntry::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
 	auto result = make_uniq<MmcifBindData>();
-	result->file_name = file_name;
-	result->table_name = table_name;
 	result->table_entry = this;
 
-	if (catalog->IsWriteMode()) {
+	if (catalog->write_mode) {
 		// Write mode: materialized store rows (DML mutates the persistent store).
-		auto store = catalog->GetWriteStore();
+		auto &store = catalog->write_store;
 		auto cat = MmcifGetWriteCategory(*store, table_name);
 		result->column_names = cat->columns;
 		// A snapshot: DML mutates the store while this scan feeds it.
@@ -256,7 +253,7 @@ TableFunction MmcifTableEntry::GetScanFunction(ClientContext &context, unique_pt
 TableStorageInfo MmcifTableEntry::GetStorageInfo(ClientContext &context) {
 	TableStorageInfo result;
 	result.cardinality = 10000;
-	if (!catalog->IsWriteMode()) {
+	if (!catalog->write_mode) {
 		auto index = catalog->GetIndex(&context);
 		auto cat = index->FindCategory(table_name);
 		if (cat) {
@@ -271,9 +268,8 @@ TableStorageInfo MmcifTableEntry::GetStorageInfo(ClientContext &context) {
 // MmcifSchemaEntry
 // ---------------------------------------------------------------------------
 
-MmcifSchemaEntry::MmcifSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, string file_name_p,
-                                   MmcifCatalog *catalog_p)
-    : SchemaCatalogEntry(catalog, info), file_name(std::move(file_name_p)), catalog(catalog_p) {
+MmcifSchemaEntry::MmcifSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, MmcifCatalog *catalog_p)
+    : SchemaCatalogEntry(catalog, info), catalog(catalog_p) {
 }
 
 optional_ptr<CatalogEntry> MmcifSchemaEntry::CreateTable(CatalogTransaction transaction, BoundCreateTableInfo &info) {
@@ -333,28 +329,18 @@ MmcifTableEntry &MmcifSchemaEntry::GetTableEntry(CatalogTransaction transaction,
 	if (existing != tables.end()) {
 		return *existing->second;
 	}
-	auto &catalog = ParentCatalog();
+	auto *columns = this->catalog->FindColumns(transaction.context, entry_name);
+	if (!columns) {
+		throw BinderException("mmcif: category '%s' not present in file '%s'", entry_name.c_str(),
+		                      this->catalog->path.c_str());
+	}
 	CreateTableInfo info(*this, entry_name);
 	auto &dict = DictionaryIndex::Get();
 	info.comment = Value(dict.GetCategoryUrl(entry_name));
-	if (this->catalog->IsWriteMode()) {
-		auto store = this->catalog->GetWriteStore();
-		auto cat = MmcifGetWriteCategory(*store, entry_name);
-		for (auto &col : cat->columns) {
-			info.columns.AddColumn(MmcifColumnDefinition(dict, entry_name, col));
-		}
-	} else {
-		auto index = this->catalog->GetIndex(transaction.context);
-		auto cat = index->FindCategory(entry_name);
-		if (!cat) {
-			throw BinderException("mmcif: category '%s' not present in file '%s'", entry_name.c_str(),
-			                      file_name.c_str());
-		}
-		for (auto &col : cat->columns) {
-			info.columns.AddColumn(MmcifColumnDefinition(dict, entry_name, col));
-		}
+	for (auto &col : *columns) {
+		info.columns.AddColumn(MmcifColumnDefinition(dict, entry_name, col));
 	}
-	auto entry = make_uniq<MmcifTableEntry>(catalog, *this, info, file_name, entry_name, this->catalog);
+	auto entry = make_uniq<MmcifTableEntry>(ParentCatalog(), *this, info, entry_name, this->catalog);
 	auto *result = entry.get();
 	tables[entry_name] = std::move(entry);
 	return *result;
@@ -366,8 +352,8 @@ void MmcifSchemaEntry::Scan(ClientContext &context, CatalogType type,
 		return; // mmcif exposes only tables
 	}
 	vector<string> categories;
-	if (catalog->IsWriteMode()) {
-		categories = catalog->GetWriteStore()->GetCategoryNames();
+	if (catalog->write_mode) {
+		categories = catalog->write_store->GetCategoryNames();
 	} else {
 		categories = catalog->GetIndex(&context)->GetCategoryNames();
 	}
@@ -390,14 +376,7 @@ optional_ptr<CatalogEntry> MmcifSchemaEntry::LookupEntry(CatalogTransaction tran
 		return nullptr;
 	}
 	auto entry_name = lookup_info.GetEntryName();
-	if (catalog->IsWriteMode()) {
-		if (catalog->GetWriteStore()->FindCategory(entry_name) == nullptr) {
-			return nullptr;
-		}
-		return &GetTableEntry(transaction, entry_name);
-	}
-	auto index = catalog->GetIndex(transaction.context);
-	if (!index->FindCategory(entry_name)) {
+	if (!catalog->FindColumns(transaction.context, entry_name)) {
 		return nullptr;
 	}
 	return &GetTableEntry(transaction, entry_name);
@@ -414,12 +393,13 @@ MmcifCatalog::MmcifCatalog(AttachedDatabase &db_p, string path_p, bool write_mod
 	}
 }
 
-bool MmcifCatalog::IsWriteMode() const {
-	return write_mode;
-}
-
-MmcifWriteStore *MmcifCatalog::GetWriteStore() {
-	return write_store.get();
+const std::vector<string> *MmcifCatalog::FindColumns(optional_ptr<ClientContext> context, const string &table_name) {
+	if (write_mode) {
+		auto cat = write_store->FindCategory(table_name);
+		return cat ? &cat->columns : nullptr;
+	}
+	auto cat = GetIndex(context)->FindCategory(table_name);
+	return cat ? &cat->columns : nullptr;
 }
 
 shared_ptr<MmcifIndex> MmcifCatalog::GetIndex(optional_ptr<ClientContext> context) {
@@ -454,7 +434,7 @@ void MmcifCatalog::Persist(ClientContext &context) {
 
 void MmcifCatalog::Initialize(bool load_builtin) {
 	CreateSchemaInfo info;
-	main_schema = make_uniq<MmcifSchemaEntry>(*this, info, path, this);
+	main_schema = make_uniq<MmcifSchemaEntry>(*this, info, this);
 }
 
 void MmcifCatalog::OnDetach(ClientContext &context) {
@@ -610,7 +590,7 @@ void MmcifTransactionManager::RollbackTransaction(Transaction &transaction) {
 }
 
 void MmcifTransactionManager::Checkpoint(ClientContext &context, bool force) {
-	if (!catalog.IsWriteMode()) {
+	if (!catalog.write_mode) {
 		throw NotImplementedException("Cannot CHECKPOINT a read-only mmcif database");
 	}
 	catalog.Persist(context);

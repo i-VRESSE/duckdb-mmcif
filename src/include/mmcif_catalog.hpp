@@ -52,10 +52,9 @@ class MmcifCatalog;
 
 class MmcifTableEntry : public TableCatalogEntry {
 public:
-	MmcifTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info, string file_name_p,
-	                string table_name_p, MmcifCatalog *catalog_p);
+	MmcifTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info, string table_name_p,
+	                MmcifCatalog *catalog_p);
 
-	string file_name;
 	string table_name;
 	MmcifCatalog *catalog;
 
@@ -72,9 +71,8 @@ public:
 
 class MmcifSchemaEntry : public SchemaCatalogEntry {
 public:
-	MmcifSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, string file_name_p, MmcifCatalog *catalog_p);
+	MmcifSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, MmcifCatalog *catalog_p);
 
-	string file_name;
 	MmcifCatalog *catalog;
 	case_insensitive_map_t<unique_ptr<MmcifTableEntry>> tables; // keep entries alive across Scan/LookupEntry
 
@@ -121,9 +119,9 @@ public:
 	shared_ptr<MmcifIndex> index;
 	mutex index_lock;
 
-	bool IsWriteMode() const;
-	MmcifWriteStore *GetWriteStore();
 	shared_ptr<MmcifIndex> GetIndex(optional_ptr<ClientContext> context);
+	// Columns of a category in the write store or the index; nullptr if absent.
+	const std::vector<string> *FindColumns(optional_ptr<ClientContext> context, const string &table_name);
 	// ROLLBACK: discard in-memory mutations by re-materializing from disk.
 	void ReloadFromDisk(optional_ptr<ClientContext> context);
 	// COMMIT / detach / checkpoint: write the in-memory store back to disk

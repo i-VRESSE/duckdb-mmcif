@@ -32,9 +32,6 @@ public:
 private:
 	DictionaryIndex();
 
-	void LoadTypes();
-	void LoadRelationships();
-
 	case_insensitive_map_t<LogicalType> types;
 	std::vector<std::pair<std::string, std::string>> relationships;
 };

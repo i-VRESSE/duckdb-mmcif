@@ -107,35 +107,18 @@ static bool MmcifPatchLineContinues(const char *src, idx_t size, idx_t pos) {
 	return false;
 }
 
-// Column that `pos` sits at in its source line: the column a replacement value
-// is spliced in at, which decides whether a text field has to break first.
-static idx_t MmcifPatchColumnOf(const char *src, idx_t pos) {
-	idx_t line = pos;
-	while (line > 0 && src[line - 1] != '\n') {
-		line--;
-	}
-	return pos - line;
-}
-
-// Line terminator the source uses on the physical line containing `pos`, so a
-// patch that has to break a line keeps the file's CRLF/LF convention.
-static string MmcifPatchEolAt(const char *src, idx_t size, idx_t pos) {
-	idx_t p = pos;
-	while (p < size && src[p] != '\n') {
-		p++;
-	}
-	if (p > 0 && p < size && src[p - 1] == '\r') {
-		return "\r\n";
-	}
-	return "\n";
-}
-
-// Line terminator of the line just before an insertion point.
+// Line terminator of the line just before `pos` (a line start), so a patch
+// keeps the file's CRLF/LF convention.
 static string MmcifPatchEolBefore(const char *src, idx_t pos) {
 	if (pos >= 2 && src[pos - 1] == '\n' && src[pos - 2] == '\r') {
 		return "\r\n";
 	}
 	return "\n";
+}
+
+// Line terminator of the physical line containing `pos`.
+static string MmcifPatchEolAt(const char *src, idx_t size, idx_t pos) {
+	return MmcifPatchEolBefore(src, MmcifLineEnd(src, size, pos));
 }
 
 static bool MmcifPatchSpecialFirstChar(char c) {
@@ -249,7 +232,7 @@ static bool MmcifPatchBlank(char c) {
 // nothing but whitespace on its lines takes those whole lines; otherwise it
 // shares a line with surviving rows and takes just one separator with it, so
 // the remaining rows keep their layout and no blank line is left behind.
-std::vector<PatchEdit> DeletionEdits(const MmcifWriteCategory &cat, const char *src, idx_t size) {
+void AddDeletionEdits(const MmcifWriteCategory &cat, const char *src, idx_t size, std::vector<PatchEdit> &edits) {
 	std::vector<MmcifRowSpan> spans;
 	for (auto &d : cat.deleted_rows) {
 		if (d.end > d.start) {
@@ -274,7 +257,6 @@ std::vector<PatchEdit> DeletionEdits(const MmcifWriteCategory &cat, const char *
 		runs.push_back(s);
 	}
 
-	std::vector<PatchEdit> edits;
 	for (auto &run : runs) {
 		idx_t line_start = run.start;
 		while (line_start > 0 && MmcifPatchBlank(src[line_start - 1])) {
@@ -303,7 +285,6 @@ std::vector<PatchEdit> DeletionEdits(const MmcifWriteCategory &cat, const char *
 			edits.push_back(PatchEdit {line_start, run.end, string()});
 		}
 	}
-	return edits;
 }
 
 bool IsInsertedRow(const MmcifWriteCategory &cat, idx_t row) {
@@ -355,8 +336,7 @@ string MmcifPatch::Apply(const MmcifWriteStore &store) {
 		}
 
 		// Deleted rows: cut them out of the source.
-		auto deletions = DeletionEdits(cat, src, size);
-		edits.insert(edits.end(), deletions.begin(), deletions.end());
+		AddDeletionEdits(cat, src, size, edits);
 
 		// Updated cells: replace exactly the bytes of the old value.
 		for (idx_t r = 0; r < cat.rows.size(); r++) {
@@ -376,9 +356,8 @@ string MmcifPatch::Apply(const MmcifWriteStore &store) {
 					                  "position in the source file",
 					                  cat.name.c_str(), cat.columns[c].c_str());
 				}
-				PatchLine line(MmcifPatchColumnOf(src, span.off), MmcifPatchEolAt(src, size, span.off));
-				EmitValue(line, cat.rows[r][c],
-				          cat.name + "." + cat.columns[c]);
+				PatchLine line(span.off - MmcifLineStart(src, span.off), MmcifPatchEolAt(src, size, span.off));
+				EmitValue(line, cat.rows[r][c], cat.name + "." + cat.columns[c]);
 				string text = line.Str();
 				if (line.AfterTextBlock() && MmcifPatchLineContinues(src, size, span.off + span.len)) {
 					text += line.Eol();
@@ -389,49 +368,37 @@ string MmcifPatch::Apply(const MmcifWriteStore &store) {
 
 		// Inserted rows: generate them and splice them in as one block, using
 		// the line ending of the line they are appended after.
-		bool has_inserts = false;
+		string inserted;
+		idx_t insert_at = 0;
+		string eol;
 		for (idx_t r = 0; r < cat.rows.size(); r++) {
-			if (IsInsertedRow(cat, r)) {
-				has_inserts = true;
-				break;
+			if (!IsInsertedRow(cat, r)) {
+				continue;
 			}
+			if (eol.empty()) {
+				insert_at = InsertionPoint(cat, *source, src, size);
+				eol = MmcifPatchEolBefore(src, insert_at);
+				if (src[insert_at - 1] != '\n') {
+					inserted = eol; // the source's last line has no newline
+				}
+			}
+			inserted += cat.is_loop ? FormatLoopRow(cat, cat.rows[r], eol) : FormatItemRow(cat, cat.rows[r], eol);
 		}
-		if (has_inserts) {
-			idx_t insert_at = InsertionPoint(cat, *source, src, size);
-			string eol = MmcifPatchEolBefore(src, insert_at);
-			string inserted;
-			for (idx_t r = 0; r < cat.rows.size(); r++) {
-				if (!IsInsertedRow(cat, r)) {
-					continue;
-				}
-				inserted += cat.is_loop ? FormatLoopRow(cat, cat.rows[r], eol) : FormatItemRow(cat, cat.rows[r], eol);
-			}
-			if (!inserted.empty()) {
-				if (insert_at > 0 && src[insert_at - 1] != '\n') {
-					inserted = eol + inserted; // the source's last line has no newline
-				}
-				edits.push_back(PatchEdit {insert_at, insert_at, inserted});
-			}
+		if (!inserted.empty()) {
+			edits.push_back(PatchEdit {insert_at, insert_at, std::move(inserted)});
 		}
 	}
 
 	std::stable_sort(edits.begin(), edits.end(),
 	                 [](const PatchEdit &a, const PatchEdit &b) { return a.start < b.start; });
 
-	idx_t extra = 0;
-	idx_t prev_end = 0;
-	for (auto &e : edits) {
-		if (e.start < prev_end || e.end > size) {
-			throw InternalException("mmcif: write-back patches overlap or run past the end of the file");
-		}
-		prev_end = e.end;
-		extra += e.text.size();
-	}
-
 	string out;
-	out.reserve(size + extra);
+	out.reserve(size);
 	idx_t cursor = 0;
 	for (auto &e : edits) {
+		if (e.start < cursor || e.end > size) {
+			throw InternalException("mmcif: write-back patches overlap or run past the end of the file");
+		}
 		out.append(src + cursor, e.start - cursor);
 		out += e.text;
 		cursor = e.end;

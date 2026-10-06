@@ -20,51 +20,32 @@ DictionaryIndex &DictionaryIndex::Get() {
 	return instance;
 }
 
+// Call fn(first, second) for each "first\tsecond" line of an embedded gzip'd
+// TSV, skipping blank and '#' comment lines.
+template <class FN>
+static void MmcifForEachTsvRow(const unsigned char *gz, idx_t gz_size, FN fn) {
+	auto content = GZipFileSystem::UncompressGZIPString(string(reinterpret_cast<const char *>(gz), gz_size));
+	for (auto &line : StringUtil::Split(content, '\n')) {
+		auto tab = line.find('\t');
+		if (line[0] == '#' || tab == string::npos) {
+			continue;
+		}
+		fn(line.substr(0, tab), line.substr(tab + 1));
+	}
+}
+
 DictionaryIndex::DictionaryIndex() {
-	LoadTypes();
-	LoadRelationships();
-}
-
-void DictionaryIndex::LoadTypes() {
-	auto content = GZipFileSystem::UncompressGZIPString(
-	    string(reinterpret_cast<const char *>(MMCIFF_TYPE_INDEX_GZ), MMCIFF_TYPE_INDEX_GZ_SIZE));
-	auto lines = StringUtil::Split(content, '\n');
-	for (auto &line : lines) {
-		if (line.empty() || line[0] == '#') {
-			continue;
-		}
-		auto tab = line.find('\t');
-		if (tab == string::npos) {
-			continue;
-		}
-		auto item = line.substr(0, tab);
-		auto type_str = line.substr(tab + 1);
-		LogicalType type;
+	MmcifForEachTsvRow(MMCIFF_TYPE_INDEX_GZ, MMCIFF_TYPE_INDEX_GZ_SIZE, [&](string item, const string &type_str) {
 		if (type_str == "DOUBLE") {
-			type = LogicalType::DOUBLE;
+			types[item] = LogicalType::DOUBLE;
 		} else if (type_str == "BIGINT") {
-			type = LogicalType::BIGINT;
+			types[item] = LogicalType::BIGINT;
 		} else {
-			type = LogicalType::VARCHAR;
+			types[item] = LogicalType::VARCHAR;
 		}
-		types[item] = std::move(type);
-	}
-}
-
-void DictionaryIndex::LoadRelationships() {
-	auto content = GZipFileSystem::UncompressGZIPString(
-	    string(reinterpret_cast<const char *>(MMCIFF_RELATIONSHIPS_GZ), MMCIFF_RELATIONSHIPS_GZ_SIZE));
-	auto lines = StringUtil::Split(content, '\n');
-	for (auto &line : lines) {
-		if (line.empty() || line[0] == '#') {
-			continue;
-		}
-		auto tab = line.find('\t');
-		if (tab == string::npos) {
-			continue;
-		}
-		relationships.emplace_back(line.substr(0, tab), line.substr(tab + 1));
-	}
+	});
+	MmcifForEachTsvRow(MMCIFF_RELATIONSHIPS_GZ, MMCIFF_RELATIONSHIPS_GZ_SIZE,
+	                   [&](string parent, string child) { relationships.emplace_back(parent, child); });
 }
 
 // "_category.item" -> DuckDB type; unknown -> VARCHAR
