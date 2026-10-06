@@ -85,8 +85,7 @@ struct MmcifGlobalState : public GlobalTableFunctionState {
 	}
 };
 
-static void MmcifLoadIndex(MmcifBindData &result, shared_ptr<MmcifIndex> index, const string &table_name,
-                           const string &file_name) {
+static void MmcifLoadIndex(MmcifBindData &result, shared_ptr<MmcifIndex> index, const string &table_name) {
 	auto cat = index->FindCategory(table_name);
 	if (!cat || cat->columns.empty()) {
 		throw BinderException("mmcif: category '%s' not present in block '%s'", table_name.c_str(),
@@ -106,7 +105,7 @@ static unique_ptr<FunctionData> MmcifBind(ClientContext &context, TableFunctionB
 	result->table_name = table_name;
 
 	auto index = MmcifIndex::Load(file_name, &context);
-	MmcifLoadIndex(*result, std::move(index), table_name, file_name);
+	MmcifLoadIndex(*result, std::move(index), table_name);
 
 	for (auto &col : result->column_names) {
 		auto type = DictionaryIndex::Get().LookupType(table_name, col);

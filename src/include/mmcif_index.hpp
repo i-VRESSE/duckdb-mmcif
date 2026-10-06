@@ -29,8 +29,6 @@
 #include <string>
 #include <vector>
 
-#include "mmcif_comments.hpp"
-
 namespace duckdb {
 
 // ---------------------------------------------------------------------------
@@ -170,7 +168,6 @@ struct MmcifCategory {
 	vector<string> columns; // item names, in first-seen order
 	bool is_loop = false;
 	vector<idx_t> loop_col_map;      // loop position -> full column index (loop categories)
-	vector<bool> is_loop_col;        // parallel to columns: true if the column comes from the loop
 	idx_t data_start = 0;            // byte offset of loop data start (loop categories)
 	idx_t data_end = 0;              // byte offset past loop data end (exclusive)
 	vector<MmcifSingleCell> singles; // single-tag cells, keyed by full column index
@@ -187,7 +184,7 @@ struct MmcifCategory {
 // and the store is MmcifIndex::Materialize() below.
 class MmcifWriteStore;
 
-class MmcifIndex : public std::enable_shared_from_this<MmcifIndex> {
+class MmcifIndex : public enable_shared_from_this<MmcifIndex> {
 public:
 	// Load (or fetch from the process-level cache) the index for a file.
 	static shared_ptr<MmcifIndex> Load(const string &path, optional_ptr<ClientContext> context);
@@ -215,42 +212,20 @@ public:
 	idx_t GetRowCount(MmcifCategory &cat);
 
 	const char *GetData() const {
-		return content_data;
-	}
-	idx_t GetDataSize() const {
-		return content_size;
+		return text.data();
 	}
 	// Size of the file text without the synthetic flush block Load appends.
 	idx_t GetOriginalTextSize() const {
 		return original_text_size;
 	}
 
-	// The parser keeps only the first data block; these flags record content
-	// the write-back writer cannot preserve (extra data_ blocks, save frames).
-	bool HasMultipleBlocks() const {
-		return has_multiple_blocks;
-	}
-	bool HasSaveFrames() const {
-		return has_save_frames;
-	}
-
-	// The comments table: every '#' line of the file, in file order, each with
-	// the anchor the writer needs to put it back where it belongs.
-	const std::vector<MmcifComment> &GetComments() const {
-		return comments;
-	}
-
 private:
-	MmcifIndex(string raw_p, string text_p, idx_t original_text_size_p)
-	    : raw(std::move(raw_p)), text(std::move(text_p)), content_data(text.data()), content_size(text.size()),
-	      original_text_size(original_text_size_p) {
+	MmcifIndex(string text_p, idx_t original_text_size_p)
+	    : text(std::move(text_p)), original_text_size(original_text_size_p) {
 	}
 	void Build();
 
-	string raw;  // compressed bytes (kept for cache invalidation checks)
 	string text; // decompressed mmCIF text (the flat string arena)
-	const char *content_data;
-	idx_t content_size;
 
 	// Size of the original file text before Load appends the synthetic
 	// "data_zzz_prototype" flush block; extra data_ lines at/after this offset
@@ -259,10 +234,7 @@ private:
 
 	string data_block_name;
 	vector<unique_ptr<MmcifCategory>> categories;
-	std::vector<MmcifComment> comments;
 	mutex row_count_lock;
-	bool has_multiple_blocks = false;
-	bool has_save_frames = false;
 };
 
 } // namespace duckdb

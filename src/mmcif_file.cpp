@@ -17,7 +17,6 @@
 
 #include "mmcif_index.hpp"
 #include "mmcif_patch.hpp"
-#include "mmcif_writer.hpp"
 
 namespace duckdb {
 
@@ -32,7 +31,8 @@ bool MmcifFile::IsRemotePath(const string &path) {
 // goes through DuckDB's virtual file system, so http/https URLs (e.g.
 // https://files.rcsb.org/download/1AMB.cif.gz) and s3:// paths work and the
 // httpfs extension is autoloaded as needed. Falls back to std::ifstream for
-// callers without a context (always local paths).
+// callers without a context (always local paths). A missing local file throws
+// either way.
 string MmcifFile::Read(const string &file_name, optional_ptr<ClientContext> context) {
 	if (context) {
 		auto &fs = FileSystem::GetFileSystem(*context);
@@ -57,6 +57,9 @@ string MmcifFile::Read(const string &file_name, optional_ptr<ClientContext> cont
 		return content;
 	}
 	std::ifstream in(file_name.c_str(), std::ios::binary);
+	if (!in) {
+		throw IOException("mmcif: file not found: %s", file_name);
+	}
 	std::stringstream ss;
 	ss << in.rdbuf();
 	return ss.str();
@@ -69,18 +72,6 @@ shared_ptr<MmcifWriteStore> MmcifFile::LoadWriteStore(const string &file_name, o
 	return index->Materialize();
 }
 
-// Render the store for write-back. The surgical patch keeps every byte of the
-// source file the transaction did not modify; the regenerating writer is only
-// used for a store that has no source (built in memory).
-static string MmcifRenderStore(const MmcifWriteStore &store) {
-	if (store.HasSource()) {
-		return MmcifPatch::Apply(store);
-	}
-	std::ostringstream ss;
-	MmcifWriteCif(ss, store);
-	return ss.str();
-}
-
 // COMMIT / detach / checkpoint: write the in-memory store back to disk.
 // Paths ending in .gz are written back gzip-compressed (the read path
 // auto-decompresses them, so writing plain text would break the round-trip).
@@ -90,7 +81,7 @@ void MmcifFile::Persist(const MmcifWriteStore &store, const string &path, Client
 	}
 	auto &fs = FileSystem::GetFileSystem(context);
 	// Render first: a failure here happens before anything is touched on disk.
-	string content = MmcifRenderStore(store);
+	string content = MmcifPatch::Apply(store);
 	// Write to a temp file in the same directory, then rename over the target:
 	// each file's write-back is atomic (a crash or failed write leaves the old
 	// file intact, never a truncated .cif). Errors are surfaced (the old

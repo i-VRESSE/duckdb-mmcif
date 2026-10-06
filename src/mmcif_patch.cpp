@@ -342,9 +342,6 @@ string FormatItemRow(const MmcifWriteCategory &cat, const std::vector<string> &r
 string MmcifPatch::Apply(const MmcifWriteStore &store) {
 	const char *src = store.SourceData();
 	idx_t size = store.SourceSize();
-	if (!src) {
-		throw InternalException("mmcif: write-back has no source text to patch");
-	}
 
 	std::vector<PatchEdit> edits;
 	for (auto &cat : store.categories) {

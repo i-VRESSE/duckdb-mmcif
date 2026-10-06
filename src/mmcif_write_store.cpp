@@ -2,7 +2,7 @@
 //
 // The index->store seam is MmcifIndex::Materialize(), defined here so the
 // read-index TU carries no write-model knowledge while this module still
-// reaches the index privates (data_block_name, categories, content_data)
+// reaches the index privates (data_block_name, categories, text)
 // without a friend declaration.
 
 #include "mmcif_write_store.hpp"
@@ -84,7 +84,9 @@ static MmcifRowSpan MmcifRowSpanFor(const char *base, idx_t size, idx_t first_of
 }
 
 shared_ptr<MmcifWriteStore> MmcifIndex::Materialize() {
-	auto store = shared_ptr<MmcifWriteStore>(new MmcifWriteStore());
+	// Keep the source around: the write-back patches it instead of regenerating.
+	auto store = make_shared_ptr<MmcifWriteStore>(shared_from_this());
+	const char *content_data = text.data();
 	store->data_block_name = data_block_name;
 	for (auto &cat : categories) {
 		MmcifWriteCategory wc;
@@ -170,15 +172,6 @@ shared_ptr<MmcifWriteStore> MmcifIndex::Materialize() {
 		}
 		store->categories.push_back(std::move(wc));
 	}
-	store->comments = comments;
-	if (has_multiple_blocks || has_save_frames) {
-		// The regenerating writer can only re-emit the first data block's
-		// categories. The surgical patch path keeps these bytes verbatim, so
-		// this only blocks the fallback writer.
-		store->MarkUnrepresentableContent();
-	}
-	// Keep the source around: the write-back patches it instead of regenerating.
-	store->SetSource(shared_from_this());
 	return store;
 }
 
@@ -197,14 +190,6 @@ std::vector<string> MmcifWriteStore::GetCategoryNames() const {
 		names.push_back(cat.name);
 	}
 	return names;
-}
-
-idx_t MmcifWriteStore::GetNumRows(MmcifWriteCategory &cat) const {
-	return cat.rows.size();
-}
-
-const std::vector<string> &MmcifWriteStore::GetRow(MmcifWriteCategory &cat, idx_t row) const {
-	return cat.rows[row];
 }
 
 void MmcifWriteStore::AddRow(MmcifWriteCategory &cat, const std::vector<string> &row) {
@@ -253,16 +238,19 @@ void MmcifWriteStore::UpdateCell(MmcifWriteCategory &cat, idx_t row, const strin
 	dirty = true;
 }
 
+MmcifWriteStore::MmcifWriteStore(shared_ptr<MmcifIndex> source_index_p) : source_index(std::move(source_index_p)) {
+}
+
 const char *MmcifWriteStore::SourceData() const {
-	return source_index ? source_index->GetData() : nullptr;
+	return source_index->GetData();
 }
 
 idx_t MmcifWriteStore::SourceSize() const {
-	return source_index ? source_index->GetOriginalTextSize() : 0;
+	return source_index->GetOriginalTextSize();
 }
 
 MmcifCategory *MmcifWriteStore::SourceCategory(const string &name) const {
-	return source_index ? source_index->FindCategory(name) : nullptr;
+	return source_index->FindCategory(name);
 }
 
 } // namespace duckdb

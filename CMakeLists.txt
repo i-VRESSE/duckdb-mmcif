@@ -46,7 +46,6 @@ set(EXTENSION_SOURCES
   src/mmcif_index.cpp
   src/mmcif_write_store.cpp
   src/mmcif_dictionary.cpp
-  src/mmcif_writer.cpp
   src/mmcif_patch.cpp
   src/mmcif_file.cpp
   src/mmcif_table_functions.cpp

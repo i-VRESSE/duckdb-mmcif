@@ -205,6 +205,12 @@ Catalog Error: Table with name nonexistent_table does not exist!
 # INSERT/UPDATE/DELETE, with write-back on COMMIT and ROLLBACK discarding.
 # ---------------------------------------------------------------------------
 
+# Write mode cannot create a file: attaching a missing one fails like read-only does.
+statement error
+ATTACH '__TEST_DIR__/mmcif_missing.cif' AS missing (TYPE mmcif, READ_WRITE TRUE);
+----
+IO Error: mmcif: file not found
+
 # Create a small writable cif fixture inside the test temp dir
 statement ok
 COPY (SELECT t FROM (VALUES ('data_test'), ('loop_'), ('_atom_site.label_atom_id'), ('_atom_site.Cartn_x'), ('_atom_site.type_symbol'), ('C1'), ('1.5'), ('C'), ('N1'), ('2.5'), ('N')) AS v(t)) TO '__TEST_DIR__/mmcif_write.cif' (FORMAT CSV, HEADER 0);

@@ -3,25 +3,23 @@
 // Evicted from the read-index header (the read path never references it).
 // Write mode keeps one persistent MmcifWriteStore per attached catalog instead
 // of the RCSB CifFile/ISTable core. Cells are materialized (row-major
-// vector<string>) so DML can mutate in place and a plain-text writer can emit
-// the file back. Null cells are stored as "." / "?" (the RCSB parser's stored
-// forms), so the writer re-emits them unchanged; "" also maps to "?" on emit.
+// vector<string>) so DML can mutate in place; MmcifPatch splices the changes
+// back into the source text. Null cells are stored as "." / "?"; "" maps to
+// "?" on write-back.
 //
 // The read seam is MmcifIndex::Materialize(): the store is materialized from
-// the (read-only) index there, so MmcifWriteStore holds no index back-pointers
-// and the index header carries no write knowledge.
+// the (read-only) index there, so the index header carries no write knowledge.
 
 #ifndef DUCKDB_MMCIF_WRITE_STORE_HPP
 #define DUCKDB_MMCIF_WRITE_STORE_HPP
 
+#include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/typedefs.hpp"
 
 #include <memory>
 #include <string>
 #include <vector>
-
-#include "mmcif_comments.hpp"
 
 namespace duckdb {
 
@@ -76,19 +74,16 @@ struct MmcifWriteCategory {
 
 class MmcifWriteStore {
 public:
-	MmcifWriteStore() = default;
+	// The source file this store was materialized from. The surgical write-back
+	// (MmcifPatch) splices the mutations into its text, so every byte the
+	// transaction did not touch survives exactly as it was read.
+	explicit MmcifWriteStore(shared_ptr<MmcifIndex> source_index);
 
 	string data_block_name;
 	std::vector<MmcifWriteCategory> categories;
-	// The comments table: every '#' line read from the source file, in file
-	// order, each carrying the anchor the writer needs to re-emit it where it
-	// belongs. DML never touches it, so comments survive INSERT/UPDATE/DELETE.
-	std::vector<MmcifComment> comments;
 
 	MmcifWriteCategory *FindCategory(const string &name);
 	std::vector<string> GetCategoryNames() const;
-	idx_t GetNumRows(MmcifWriteCategory &cat) const;
-	const std::vector<string> &GetRow(MmcifWriteCategory &cat, idx_t row) const;
 	void AddRow(MmcifWriteCategory &cat, const std::vector<string> &row);
 	void DeleteRows(MmcifWriteCategory &cat, const std::vector<unsigned int> &rows);
 	void UpdateCell(MmcifWriteCategory &cat, idx_t row, const string &col, const string &value);
@@ -103,26 +98,6 @@ public:
 		dirty = false;
 	}
 
-	// True when the source file carries content (extra data blocks / save
-	// frames) that the regenerating writer cannot preserve. Write-back is
-	// refused for such files unless the surgical patch path is available
-	// (HasSource()), which keeps those bytes verbatim.
-	bool HasUnrepresentableContent() const {
-		return has_unrepresentable_content;
-	}
-	void MarkUnrepresentableContent() {
-		has_unrepresentable_content = true;
-	}
-
-	// The source file this store was materialized from. The surgical write-back
-	// (MmcifPatch) splices the mutations into this text, so every byte the
-	// transaction did not touch survives exactly as it was read.
-	bool HasSource() const {
-		return source_index != nullptr;
-	}
-	void SetSource(std::shared_ptr<MmcifIndex> index) {
-		source_index = std::move(index);
-	}
 	// The source text, excluding the parser's synthetic flush block.
 	const char *SourceData() const;
 	idx_t SourceSize() const;
@@ -130,9 +105,8 @@ public:
 	MmcifCategory *SourceCategory(const string &name) const;
 
 private:
-	std::shared_ptr<MmcifIndex> source_index;
+	shared_ptr<MmcifIndex> source_index;
 	bool dirty = false;
-	bool has_unrepresentable_content = false;
 };
 
 } // namespace duckdb

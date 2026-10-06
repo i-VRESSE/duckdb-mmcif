@@ -2,12 +2,9 @@
 // of the file it was read from, so the result differs from the original only
 // where the transaction actually changed something.
 //
-// The regenerating writer (MmcifWriteCif) re-emits the whole file from the data
-// model, which reformats everything it touches: column alignment, quoting,
-// line breaks. Patching instead keeps every byte the transaction did not modify
-// exactly as it was read - comments, blank lines, alignment, the quoting of
-// untouched values, and content the data model does not carry (extra data
-// blocks, save frames).
+// Every byte the transaction did not modify is kept exactly as it was read -
+// comments, blank lines, alignment, the quoting of untouched values, and
+// content the data model does not carry (extra data blocks, save frames).
 //
 // The store records where every row and cell came from (MmcifRowSpan /
 // MmcifCellSpan), which is what makes this possible:

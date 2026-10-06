@@ -146,9 +146,7 @@ cell of a 7,696-line `3PLZ.cif` rewrites one line, and a transaction that
 inserts a row and deletes it again leaves the file byte-identical.
 
 `#` comment lines are never rewritten either — they stay on their own line
-exactly where they were, including above a row you delete. (The parser still
-records each comment together with what it sits in front of: the block header,
-a category, a single item, a loop row, or the end of the file.)
+exactly where they were, including above a row you delete.
 
 Values that have to be *created* — an inserted row, or an updated value that
 needs a `;...;` text field — are formatted with the least quoting that keeps

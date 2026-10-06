@@ -28,7 +28,8 @@ public:
 	// read goes through DuckDB's virtual file system, so http/https URLs
 	// (e.g. https://files.rcsb.org/download/1AMB.cif.gz) and s3:// paths work
 	// and the httpfs extension is autoloaded as needed. Falls back to
-	// std::ifstream for callers without a context (always local paths).
+	// std::ifstream for callers without a context (always local paths). A
+	// missing local file throws either way.
 	static string Read(const string &path, optional_ptr<ClientContext> context);
 
 	// Materialize the no-deps mutable write store for a file (gzip'd inputs

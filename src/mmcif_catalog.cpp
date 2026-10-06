@@ -54,7 +54,6 @@ static string MmcifCellToString(const Vector &vec, idx_t row) {
 
 struct MmcifWriteGlobalState : public GlobalSinkState {
 	idx_t count = 0;
-	mutex lock;
 	// DELETE row ids are accumulated across sink chunks and applied once in Combine:
 	// row ids refer to positions in the table as it was when the scan started, so
 	// applying them chunk-by-chunk would use stale indices after the first shrink.
@@ -98,7 +97,6 @@ public:
 		auto cat = MmcifGetWriteCategory(*store, table_name);
 		idx_t num_cols = cat->columns.size();
 		chunk.Flatten();
-		lock_guard<mutex> l(gstate.lock);
 		for (idx_t r = 0; r < chunk.size(); r++) {
 			std::vector<string> row(num_cols, "");
 			for (idx_t c = 0; c < num_cols; c++) {
@@ -166,7 +164,6 @@ public:
 		chunk.Flatten();
 		auto &row_ids = chunk.data[row_id_index];
 		auto row_data = FlatVector::GetData<int64_t>(row_ids);
-		lock_guard<mutex> l(gstate.lock);
 		for (idx_t r = 0; r < chunk.size(); r++) {
 			gstate.delete_indices.push_back(NumericCast<unsigned int>(row_data[r]));
 		}
@@ -174,7 +171,6 @@ public:
 	}
 	SinkCombineResultType Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const override {
 		auto &gstate = input.global_state.Cast<MmcifWriteGlobalState>();
-		lock_guard<mutex> l(gstate.lock);
 		std::vector<unsigned int> indices;
 		indices.swap(gstate.delete_indices);
 		sort(indices.begin(), indices.end());
@@ -240,7 +236,6 @@ public:
 		chunk.Flatten();
 		auto &row_ids = chunk.data[chunk.ColumnCount() - 1];
 		auto row_data = FlatVector::GetData<int64_t>(row_ids);
-		lock_guard<mutex> l(gstate.lock);
 		for (idx_t r = 0; r < chunk.size(); r++) {
 			for (idx_t i = 0; i < columns.size(); i++) {
 				store->UpdateCell(*cat, NumericCast<idx_t>(row_data[r]), col_names[columns[i]],
@@ -477,19 +472,10 @@ optional_ptr<CatalogEntry> MmcifSchemaEntry::LookupEntry(CatalogTransaction tran
 // MmcifCatalog
 // ---------------------------------------------------------------------------
 
-MmcifCatalog::MmcifCatalog(AttachedDatabase &db_p, string path_p, bool write_mode_p)
+MmcifCatalog::MmcifCatalog(AttachedDatabase &db_p, string path_p, bool write_mode_p, ClientContext &context)
     : Catalog(db_p), path(std::move(path_p)), write_mode(write_mode_p) {
 	if (write_mode) {
-		write_store = MmcifFile::LoadWriteStore(path, nullptr);
-		// The surgical write-back keeps content the data model does not carry
-		// (extra data blocks, save frames) byte-for-byte, so only the
-		// regenerating fallback has to refuse such files.
-		if (write_store->HasUnrepresentableContent() && !write_store->HasSource()) {
-			throw InvalidInputException(
-			    "mmcif: '%s' cannot be attached with READ_WRITE - the file contains multiple data blocks or save "
-			    "frames that write mode cannot write back without losing them",
-			    path.c_str());
-		}
+		write_store = MmcifFile::LoadWriteStore(path, &context);
 	}
 }
 
@@ -526,11 +512,6 @@ void MmcifCatalog::Persist(ClientContext &context) {
 	if (!write_store->IsDirty()) {
 		// Read-only / no-op transactions never rewrite the file.
 		return;
-	}
-	if (write_store->HasUnrepresentableContent() && !write_store->HasSource()) {
-		throw IOException("mmcif: cannot commit write-back of '%s' - the file contains multiple data blocks or save "
-		                  "frames that write mode cannot preserve",
-		                  path.c_str());
 	}
 	MmcifFile::Persist(*write_store, path, context);
 	write_store->ClearDirty();
@@ -748,7 +729,7 @@ static unique_ptr<Catalog> MmcifAttach(optional_ptr<StorageExtensionInfo> storag
 	if (write_mode && !MmcifFile::IsRemotePath(info.path) && FileSystem::GetFileSystem(context).IsPipe(info.path)) {
 		throw InvalidInputException("mmcif: '%s' cannot be attached with READ_WRITE - pipes are read-only", info.path);
 	}
-	return make_uniq<MmcifCatalog>(db, info.path, write_mode);
+	return make_uniq<MmcifCatalog>(db, info.path, write_mode, context);
 }
 
 static unique_ptr<TransactionManager> MmcifCreateTransactionManager(optional_ptr<StorageExtensionInfo> storage_info,
