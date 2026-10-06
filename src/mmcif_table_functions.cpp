@@ -207,7 +207,7 @@ static void MmcifScan(ClientContext &context, TableFunctionInput &data, DataChun
 		MmcifScanIndex(context, output, gstate);
 		return;
 	}
-	// Legacy write-mode scan over materialized rows.
+	// Write mode: scan the snapshot of the store's rows.
 	idx_t row = gstate.position;
 	idx_t count = 0;
 	while (row < bind.rows.size() && count < STANDARD_VECTOR_SIZE) {

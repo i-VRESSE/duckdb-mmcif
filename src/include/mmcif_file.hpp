@@ -1,7 +1,5 @@
-// One owner of the file-format policy: remote/gzip/plain handling plus the
-// write loader. Before this module the remote-path test and the raw-content
-// reader were duplicated in the index and the core, and the gzip-vs-plain
-// write-back policy lived inside the catalog.
+// File-format policy: remote/gzip/plain reads, the write loader, and the
+// gzip-aware write-back.
 
 #pragma once
 

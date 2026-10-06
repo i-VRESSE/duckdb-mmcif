@@ -1,7 +1,5 @@
-// File-format module: one owner of the remote/gzip/plain policy plus the
-// write loader. The duplicated MmcifIsRemotePath/MmcifReadFileContents helpers
-// (previously one copy in the index, one in the core) were consolidated here,
-// and the catalog's write-back logic moved out of MmcifCatalog::Persist.
+// File-format policy: remote/gzip/plain reads, the write loader, and the
+// gzip-aware write-back.
 
 #include "mmcif_file.hpp"
 

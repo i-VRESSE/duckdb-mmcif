@@ -163,7 +163,8 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Read-only transaction manager (DuckTransactionManager requires a DuckCatalog).
+// Transaction manager (DuckTransactionManager requires a DuckCatalog). In write
+// mode COMMIT/CHECKPOINT persist the store and ROLLBACK reloads it from disk.
 // ---------------------------------------------------------------------------
 
 class MmcifTransactionManager : public TransactionManager {
