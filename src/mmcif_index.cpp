@@ -190,7 +190,7 @@ void MmcifIndex::Build() {
 		state = TOP;
 	};
 	// Index of item in cur's columns, appending it when first seen.
-	auto column_index = [&](const string &item) {
+	auto column_index = [&](const string &item) -> idx_t {
 		for (idx_t i = 0; i < cur->columns.size(); i++) {
 			if (cur->columns[i] == item) {
 				return i;
