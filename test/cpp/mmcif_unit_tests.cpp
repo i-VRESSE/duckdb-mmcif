@@ -692,3 +692,25 @@ TEST_CASE("MmcifPatch preserves trailing newlines in text fields", "[mmcif][patc
 		}
 	}
 }
+
+TEST_CASE("MmcifPatch inserts into an empty loop after deleting all rows and reloading", "[mmcif][patch]") {
+	TempCif cif("mmcif_patch_empty_loop_source.cif", "data_t\nloop_\n_entry.id\noriginal\n");
+	auto store = PatchFixture(cif);
+	store->DeleteRows(*store->FindCategory("entry"), {0});
+	TempCif empty("mmcif_patch_empty_loop.cif", MmcifPatch::Apply(*store));
+	auto reloaded = PatchFixture(empty);
+	auto *cat = reloaded->FindCategory("entry");
+	REQUIRE(cat->rows.empty());
+	reloaded->AddRow(*cat, {"new"});
+	TempCif filled("mmcif_patch_empty_loop_filled.cif", MmcifPatch::Apply(*reloaded));
+	REQUIRE(PatchFixture(filled)->FindCategory("entry")->rows == cat->rows);
+
+	TempCif middle("mmcif_patch_empty_loop_middle.cif", "data_t\nloop_\n_entry.id\n# keep\nloop_\n_other.id\nx\n");
+	auto middle_store = PatchFixture(middle);
+	REQUIRE(middle_store->FindCategory("entry")->rows.empty());
+	middle_store->AddRow(*middle_store->FindCategory("entry"), {"new"});
+	TempCif middle_filled("mmcif_patch_empty_loop_middle_filled.cif", MmcifPatch::Apply(*middle_store));
+	auto middle_reloaded = PatchFixture(middle_filled);
+	REQUIRE(middle_reloaded->FindCategory("entry")->rows[0][0] == "new");
+	REQUIRE(middle_reloaded->FindCategory("other")->rows[0][0] == "x");
+}

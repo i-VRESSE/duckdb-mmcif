@@ -184,7 +184,7 @@ void MmcifIndex::Build() {
 	};
 	// Close a running loop at line_start (the first line that is not loop data).
 	auto end_loop = [&](idx_t line_start) {
-		if (state == LOOP_DATA && cur) {
+		if ((state == LOOP_DATA || state == LOOP_HEADER) && cur) {
 			cur->data_end = line_start;
 		}
 		state = TOP;
@@ -231,6 +231,8 @@ void MmcifIndex::Build() {
 						cur->is_loop = true;
 					}
 					cur->loop_col_map.push_back(column_index(item));
+					// Also anchor an empty loop, which has no first data line.
+					cur->data_start = MmcifLineEnd(base, size, line_start);
 				} else {
 					// Single-tag item "_cat.item value". A running loop ends here:
 					// close it while it is still `cur`, because the finalize() below
