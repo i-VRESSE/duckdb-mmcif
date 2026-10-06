@@ -53,13 +53,10 @@ public:
 		if (col != 0) {
 			Newline();
 		}
-		string body = value;
-		if (!body.empty() && body.back() == '\n') {
-			body.pop_back(); // the closing ';' line supplies it
-		}
 		// End on the closing ';' without consuming the line: the source's own
 		// newline (or the row's terminating one) finishes it.
-		out += ";" + body + eol;
+		// The newline before the closing delimiter is not part of the value.
+		out += ";" + value + eol;
 		out += ";";
 		col = 1;
 		first = false;

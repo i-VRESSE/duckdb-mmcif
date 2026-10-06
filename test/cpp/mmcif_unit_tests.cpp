@@ -679,3 +679,16 @@ TEST_CASE("MmcifPatch promotes item/value categories to loops when inserting row
 	TempCif replaced("mmcif_patch_promoted_replaced.cif", MmcifPatch::Apply(*store));
 	REQUIRE(PatchFixture(replaced)->FindCategory("entry")->rows == cat->rows);
 }
+
+TEST_CASE("MmcifPatch preserves trailing newlines in text fields", "[mmcif][patch]") {
+	for (const auto &eol : {std::string("\n"), std::string("\r\n")}) {
+		TempCif cif("mmcif_patch_trailing_newline.cif", "data_t" + eol + "_entry.note original" + eol);
+		for (const auto &value : {std::string("hello\n"), std::string("hello\n\n"), std::string("\n")}) {
+			auto store = PatchFixture(cif);
+			auto *cat = store->FindCategory("entry");
+			store->UpdateCell(*cat, 0, 0, value);
+			TempCif patched("mmcif_patch_trailing_newline_roundtrip.cif", MmcifPatch::Apply(*store));
+			REQUIRE(PatchFixture(patched)->FindCategory("entry")->rows[0][0] == value);
+		}
+	}
+}
