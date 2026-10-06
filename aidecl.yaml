@@ -20,7 +20,7 @@ ai_usage:
     model: Deepseek v4 Flash
     purpose:
     - code generation
-  - name: VS Code
+  - name: GitHub Copilot in VS Code
     type: assistant
     hosting: cloud_vendor
     model: Claude Opus 5.5
