@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "mmcif_index.hpp"
+#include "mmcif_write_store.hpp"
 
 namespace duckdb {
 
@@ -30,8 +31,10 @@ struct MmcifBindData : public FunctionData {
 	// bind, so LIMIT 10 never copies 2.44M rows.
 	shared_ptr<MmcifIndex> index;
 	MmcifCategory *category = nullptr;
-	// Write-mode path: materialized write-store rows.
-	std::vector<std::vector<string>> rows;
+	// Write-mode path: the catalog's store and the scanned category. The store
+	// is shared, not copied; the scan reads the rows present when it starts.
+	shared_ptr<MmcifWriteStore> store;
+	MmcifWriteCategory *write_category = nullptr;
 	optional_ptr<TableCatalogEntry> table_entry; // set only for attached-table scans
 
 	unique_ptr<FunctionData> Copy() const override;

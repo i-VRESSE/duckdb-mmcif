@@ -236,8 +236,8 @@ TableFunction MmcifTableEntry::GetScanFunction(ClientContext &context, unique_pt
 		auto &store = catalog->write_store;
 		auto cat = MmcifGetWriteCategory(*store, table_name);
 		result->column_names = cat->columns;
-		// A snapshot: DML mutates the store while this scan feeds it.
-		result->rows = cat->rows;
+		result->store = store;
+		result->write_category = cat;
 		for (auto &col : result->column_names) {
 			result->column_types.push_back(DictionaryIndex::Get().LookupType(table_name, col));
 		}
@@ -261,14 +261,14 @@ TableFunction MmcifTableEntry::GetScanFunction(ClientContext &context, unique_pt
 
 TableStorageInfo MmcifTableEntry::GetStorageInfo(ClientContext &context) {
 	TableStorageInfo result;
-	result.cardinality = 10000;
-	if (!catalog->write_mode) {
+	if (catalog->write_mode) {
+		auto cat = catalog->write_store->FindCategory(table_name);
+		result.cardinality = cat ? cat->rows.size() : 0;
+	} else {
 		auto index = catalog->GetIndex(&context);
 		auto cat = index->FindCategory(table_name);
-		if (cat) {
-			// Exact cardinality, computed lazily once per category (cached).
-			result.cardinality = index->GetRowCount(*cat);
-		}
+		// Exact cardinality, computed lazily once per category (cached).
+		result.cardinality = cat ? index->GetRowCount(*cat) : 0;
 	}
 	return result;
 }
@@ -423,8 +423,8 @@ shared_ptr<MmcifIndex> MmcifCatalog::GetIndex(optional_ptr<ClientContext> contex
 }
 
 void MmcifCatalog::ReloadFromDisk(optional_ptr<ClientContext> context) {
-	if (!write_mode) {
-		return;
+	if (!write_mode || !write_store->IsDirty()) {
+		return; // nothing to discard
 	}
 	write_store = MmcifIndex::Load(path, context)->Materialize();
 }

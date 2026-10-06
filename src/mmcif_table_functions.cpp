@@ -60,6 +60,9 @@ struct MmcifGlobalState : public GlobalTableFunctionState {
 				                                     bind.category->data_end);
 			}
 		}
+		if (bind.write_category) {
+			write_end = bind.write_category->rows.size();
+		}
 	}
 	const MmcifBindData &bind;
 	vector<column_t> column_ids;
@@ -68,6 +71,9 @@ struct MmcifGlobalState : public GlobalTableFunctionState {
 	vector<idx_t> full_to_out;                     // full column index -> output position
 	vector<const MmcifSingleCell *> single_by_col; // full column index -> single cell (broadcast)
 	unique_ptr<MmcifValueCursor> cursor;
+	// Write mode: rows past this one were added after the scan started (an
+	// INSERT ... SELECT from the same table) and are not scanned.
+	idx_t write_end = 0;
 	bool done = false;
 	bool single_done = false;
 
@@ -111,15 +117,10 @@ static unique_ptr<GlobalTableFunctionState> MmcifInitGlobal(ClientContext &conte
 // incrementally from the byte cursor, row-major, into per-column VARCHAR
 // vectors, then vectorized-cast each column to its dictionary type. LIMIT
 // pushdown falls out naturally: we stop after the requested rows are filled.
-static void MmcifScanIndex(ClientContext &context, DataChunk &output, MmcifGlobalState &gstate) {
+static idx_t MmcifScanIndex(DataChunk &output, MmcifGlobalState &gstate, vector<unique_ptr<Vector>> &tmp,
+                            vector<string_t *> &ptrs) {
 	auto &cat = *gstate.bind.category;
 	idx_t out_cols = output.ColumnCount();
-	vector<unique_ptr<Vector>> tmp(out_cols);
-	vector<string_t *> ptrs(out_cols);
-	for (idx_t c = 0; c < out_cols; c++) {
-		tmp[c] = make_uniq<Vector>(LogicalType::VARCHAR);
-		ptrs[c] = FlatVector::GetData<string_t>(*tmp[c]);
-	}
 
 	idx_t count = 0;
 	if (cat.is_loop) {
@@ -168,8 +169,7 @@ static void MmcifScanIndex(ClientContext &context, DataChunk &output, MmcifGloba
 	} else {
 		// Single-tag category: exactly one row.
 		if (gstate.single_done) {
-			output.SetCardinality(0);
-			return;
+			return 0;
 		}
 		for (idx_t c = 0; c < out_cols; c++) {
 			auto col_id = gstate.column_ids[c];
@@ -193,7 +193,47 @@ static void MmcifScanIndex(ClientContext &context, DataChunk &output, MmcifGloba
 		gstate.single_done = true;
 	}
 
-	// Vectorized cast VARCHAR -> dictionary type for each real column.
+	return count;
+}
+
+// Write-mode scan: the store's rows, by index (an INSERT sink may grow the row
+// vector between chunks). Cells are copied into the vector because an UPDATE
+// sink overwrites store cells while this chunk's values are still in use.
+static idx_t MmcifScanStore(DataChunk &output, MmcifGlobalState &gstate, vector<unique_ptr<Vector>> &tmp,
+                            vector<string_t *> &ptrs) {
+	auto &rows = gstate.bind.write_category->rows;
+	idx_t count = 0;
+	for (; gstate.position < gstate.write_end && count < STANDARD_VECTOR_SIZE; gstate.position++, count++) {
+		auto &row = rows[gstate.position];
+		for (idx_t c = 0; c < output.ColumnCount(); c++) {
+			auto col_id = gstate.column_ids[c];
+			if (col_id == COLUMN_IDENTIFIER_ROW_ID) {
+				output.data[c].SetValue(count, Value::Numeric(LogicalType::BIGINT, gstate.position));
+			} else if (col_id == COLUMN_IDENTIFIER_EMPTY) {
+				output.data[c].SetValue(count, Value(true));
+			} else if (MmcifBindData::IsNullCell(row[col_id])) {
+				FlatVector::SetNull(*tmp[c], count, true);
+			} else {
+				ptrs[c][count] = StringVector::AddString(*tmp[c], row[col_id]);
+			}
+		}
+	}
+	return count;
+}
+
+// Both modes fill per-column VARCHAR vectors, then cast each column to its
+// dictionary type in one vectorized pass.
+static void MmcifScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &gstate = data.global_state->Cast<MmcifGlobalState>();
+	idx_t out_cols = output.ColumnCount();
+	vector<unique_ptr<Vector>> tmp(out_cols);
+	vector<string_t *> ptrs(out_cols);
+	for (idx_t c = 0; c < out_cols; c++) {
+		tmp[c] = make_uniq<Vector>(LogicalType::VARCHAR);
+		ptrs[c] = FlatVector::GetData<string_t>(*tmp[c]);
+	}
+	idx_t count = gstate.bind.write_category ? MmcifScanStore(output, gstate, tmp, ptrs)
+	                                         : MmcifScanIndex(output, gstate, tmp, ptrs);
 	for (idx_t c = 0; c < out_cols; c++) {
 		auto col_id = gstate.column_ids[c];
 		if (col_id == COLUMN_IDENTIFIER_ROW_ID || col_id == COLUMN_IDENTIFIER_EMPTY) {
@@ -201,42 +241,6 @@ static void MmcifScanIndex(ClientContext &context, DataChunk &output, MmcifGloba
 		}
 		VectorOperations::Cast(context, *tmp[c], output.data[c], count);
 	}
-	output.SetCardinality(count);
-}
-
-static void MmcifScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
-	auto &gstate = data.global_state->Cast<MmcifGlobalState>();
-	auto &bind = gstate.bind;
-	if (bind.index && bind.category) {
-		MmcifScanIndex(context, output, gstate);
-		return;
-	}
-	// Write mode: scan the snapshot of the store's rows.
-	idx_t row = gstate.position;
-	idx_t count = 0;
-	while (row < bind.rows.size() && count < STANDARD_VECTOR_SIZE) {
-		const auto &r = bind.rows[row];
-		for (idx_t c = 0; c < output.ColumnCount(); c++) {
-			auto col_id = gstate.column_ids[c];
-			auto &vec = output.data[c];
-			if (col_id == COLUMN_IDENTIFIER_ROW_ID || col_id == COLUMN_IDENTIFIER_EMPTY) {
-				if (col_id == COLUMN_IDENTIFIER_ROW_ID) {
-					vec.SetValue(count, Value::Numeric(LogicalType::BIGINT, row));
-				} else {
-					vec.SetValue(count, Value(true));
-				}
-				continue;
-			}
-			if (MmcifBindData::IsNullCell(r[col_id])) {
-				vec.SetValue(count, Value());
-			} else {
-				vec.SetValue(count, Value(r[col_id]));
-			}
-		}
-		row++;
-		count++;
-	}
-	gstate.position = row;
 	output.SetCardinality(count);
 }
 

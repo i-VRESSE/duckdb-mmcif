@@ -947,3 +947,34 @@ query IIIII
 SELECT * FROM mmcif_scan('__TEST_DIR__/mmcif_values.cif', 's');
 ----
 1	new	q	e	2000
+
+# ---------------------------------------------------------------------------
+# Write-mode scans read the live store: a self-INSERT sees only the rows that
+# existed when it started, and SET b = a reads a's old value.
+# ---------------------------------------------------------------------------
+
+statement ok
+COPY (SELECT concat_ws(chr(10), 'data_w', 'loop_', '_w.a', '_w.b', 'a_long_first_value x', 'a_long_second_value y')) TO '__TEST_DIR__/mmcif_live.cif' (FORMAT CSV, HEADER 0, QUOTE '');
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_live.cif' AS lv (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok
+INSERT INTO lv.w SELECT * FROM lv.w;
+
+query I
+SELECT count(*) FROM lv.w;
+----
+4
+
+statement ok
+UPDATE lv.w SET a = 'replaced_with_a_long_value', b = a;
+
+query II
+SELECT DISTINCT a, b FROM lv.w ORDER BY b;
+----
+replaced_with_a_long_value	a_long_first_value
+replaced_with_a_long_value	a_long_second_value
+
+statement ok
+DETACH lv;
