@@ -299,11 +299,6 @@ void MmcifIndex::Build() {
 			} else {
 				// Continuation loop data line, or a stray non-tag line at TOP: ignore.
 			}
-		} else {
-			// Blank line: terminates loop data.
-			if (state == LOOP_DATA) {
-				end_loop(line_start);
-			}
 		}
 		if (state == LOOP_DATA && base[line_start] == ';') {
 			// A text field in loop data: skip it whole, so its lines (blank,

@@ -663,7 +663,7 @@ TEST_CASE("MmcifPatch keeps a CRLF file's line ending convention", "[mmcif][patc
 }
 
 TEST_CASE("MmcifPatch promotes item/value categories to loops when inserting rows", "[mmcif][patch]") {
-	TempCif cif("mmcif_patch_promote.cif", "data_t\n_entry.id original\n# keep\n_entry.note\n;long\nnote\n;\n_entry.empty\n");
+	TempCif cif("mmcif_patch_promote.cif", "data_t\n_entry.id original\n\n# keep\n_entry.note\n;long\nnote\n;\n_entry.empty\n");
 	auto store = PatchFixture(cif);
 	auto *cat = store->FindCategory("entry");
 	store->AddRow(*cat, {"added", "new note", "present"});
@@ -673,6 +673,7 @@ TEST_CASE("MmcifPatch promotes item/value categories to loops when inserting row
 	REQUIRE(reloaded->FindCategory("entry")->rows ==
 	        std::vector<std::vector<string>> {{"updated", "long\nnote", "?"}, {"added", "new note", "present"}});
 	REQUIRE(Contains(MmcifFile::Read(patched.Str(), nullptr), "# keep\n"));
+	REQUIRE(Contains(MmcifFile::Read(patched.Str(), nullptr), "\n\n# keep\n"));
 
 	store->DeleteRows(*cat, {0});
 	store->AddRow(*cat, {"another", "note", "value"});
