@@ -136,30 +136,6 @@ COMMIT;   -- writes the mutated tables back to the attached file
 >[!NOTE]
 >The `COMMIT` will overwrite the file you `ATTACH`-ed. Make a copy if you do not want to overwrite the original.
 
-### The write-back only changes what you edited
-
-`COMMIT` patches the bytes of the file it read rather than regenerating it, so
-everything the transaction did not touch survives exactly as it was: column
-alignment, blank lines, the quoting of values you did not edit, and content the
-data model does not carry (extra `data_` blocks, save frames). Updating one
-cell of a 7,696-line `3PLZ.cif` rewrites one line, and a transaction that
-inserts a row and deletes it again leaves the file byte-identical.
-
-`#` comment lines are never rewritten either — they stay on their own line
-exactly where they were, including above a row you delete.
-
-Values that have to be *created* — an inserted row, or an updated value that
-needs a `;...;` text field — are formatted with the least quoting that keeps
-them unambiguous, and a text field always opens in column 1 as the mmCIF spec
-requires. A file written with CRLF line endings keeps CRLF on the lines the
-write-back adds. A value that cannot be represented (a text field containing a
-line that starts with `;`) is reported as an error at `COMMIT` rather than
-written out badly.
-
-Because untouched bytes are preserved, a file with more than one `data_` block
-or with save frames can be attached read-write: the blocks the data model does
-not carry are left alone. Only the first `data_` block is editable.
-
 ## Examples
 
 Ready-to-run example scripts live in [`docs/examples/`](docs/examples/):
