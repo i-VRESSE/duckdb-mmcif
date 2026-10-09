@@ -6,7 +6,7 @@
 
 Query [mmCIF](https://mmcif.wwpdb.org/) (PDBx) structural-biology files with SQL, right inside [DuckDB](https://duckdb.org/).
 
-`ATTACH` a `.cif` file and every mmCIF category shows up as a normal DuckDB table — with column types inferred from the PDBx/mmCIF dictionary. No ETL, no schema design, no Python parsing loop: just SQL over macromolecular structure data.
+`ATTACH` a `.cif` file and every mmCIF category shows up as a normal DuckDB table — with column types inferred from the bundled PDBx/mmCIF dictionary and its supported extensions. No ETL, no schema design, no Python parsing loop: just SQL over macromolecular structure data.
 
 ## What is mmCIF?
 
@@ -55,12 +55,38 @@ FROM atom_site
 WHERE type_symbol = 'ZN';
 ```
 
-Column types are inferred from the mmCIF dictionary (`dict/mmcif_pdbx_v50_type_index.tsv.gz`):
+Column types are inferred from the combined dictionary (`dict/mmcif_type_index.tsv.gz`):
 
 ```sql
 DESCRIBE atom_site;
 -- Cartn_x DOUBLE, label_seq_id BIGINT, type_symbol VARCHAR, ...
 ```
+
+## Dictionary extensions
+
+The extension bundles the current PDBx/mmCIF v5 dictionary together with
+**IHMCIF**, **flrCIF** and **3DEM**. All are available by default: no dictionary
+selection or downloads are needed when opening a file.
+
+```sql
+ATTACH 'integrative_model.cif' AS model (TYPE mmcif);
+SHOW TABLES FROM model;
+SELECT * FROM model.ihm_model_list;
+-- Or discover and scan categories without attaching:
+SELECT * FROM mmcif_tables('integrative_model.cif');
+SELECT * FROM mmcif_scan('integrative_model.cif', 'ihm_model_list');
+```
+
+Only categories and columns present in the selected data block are exposed.
+The combined dictionary supplies types, documentation links and relationships,
+including links between extension categories and base categories. Catalog
+comments link to the dictionary defining each category or item. Unknown items
+keep the `VARCHAR` fallback.
+
+Shared definitions keep the current base dictionary's types and documentation;
+reviewed type conflicts are recorded in [`dict/sources.json`](dict/sources.json).
+That manifest also records bundled dictionary versions and source checksums.
+Older and alternative base dictionaries are not bundled.
 
 ## Table functions
 

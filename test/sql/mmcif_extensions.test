@@ -1,0 +1,149 @@
+# name: test/sql/mmcif_extensions.test
+# description: Combined base, IHMCIF, flrCIF and 3DEM dictionary support
+# group: [sql]
+
+require mmcif
+
+# Discover only categories present in the selected block, without options.
+query T
+SELECT table_name FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/mmcif_extensions.cif') ORDER BY table_name;
+----
+atom_site
+custom
+em_exptl
+em_map
+em_vitrification
+entity
+entry
+flr_fps_global_parameter
+flr_fret_analysis
+ihm_dataset_list
+ihm_model_list
+ihm_struct_assembly_details
+
+query TTT
+SELECT table_name, column_name, data_type FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/mmcif_extensions.cif') WHERE column_name IN ('model_id', 'ihm_model_id', 'resolution_high', 'humidity', 'data_type', 'value', 'FORSTER_RADIUS_VALUE') ORDER BY table_name, column_name;
+----
+atom_site	ihm_model_id	BIGINT
+custom	value	VARCHAR
+em_exptl	resolution_high	DOUBLE
+em_map	data_type	VARCHAR
+em_vitrification	humidity	DOUBLE
+flr_fps_global_parameter	FORSTER_RADIUS_VALUE	DOUBLE
+ihm_model_list	model_id	BIGINT
+
+query T
+SELECT comment FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/mmcif_extensions.cif') WHERE table_name IN ('atom_site', 'em_exptl', 'flr_fret_analysis', 'ihm_model_list') ORDER BY table_name;
+----
+https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Categories/atom_site.html
+https://mmcif.wwpdb.org/dictionaries/mmcif_em.dic/Categories/em_exptl.html
+https://mmcif.wwpdb.org/dictionaries/mmcif_ihm_flr_ext.dic/Categories/flr_fret_analysis.html
+https://mmcif.wwpdb.org/dictionaries/mmcif_ihm_ext.dic/Categories/ihm_model_list.html
+
+query T
+SELECT comment FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/mmcif_extensions.cif') WHERE (table_name, column_name) IN (('atom_site', 'ihm_model_id'), ('em_map', 'data_type'), ('flr_fps_global_parameter', 'FORSTER_RADIUS_VALUE')) ORDER BY table_name;
+----
+https://mmcif.wwpdb.org/dictionaries/mmcif_ihm_ext.dic/Items/_atom_site.ihm_model_id.html
+https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_em_map.data_type.html
+https://mmcif.wwpdb.org/dictionaries/mmcif_ihm_flr_ext.dic/Items/_flr_FPS_global_parameter.forster_radius_value.html
+
+# Cross-dictionary links and deduplication of IHM definitions repeated in flrCIF.
+query TTTTI
+SELECT parent_table, parent_column, child_table, child_column, count(*) FROM mmcif_relationships('__WORKING_DIRECTORY__/test/data/mmcif_extensions.cif') WHERE (child_table, child_column) IN (('atom_site', 'ihm_model_id'), ('em_exptl', 'entry_id'), ('flr_fret_analysis', 'dataset_list_id'), ('ihm_struct_assembly_details', 'entity_id')) GROUP BY ALL ORDER BY child_table;
+----
+ihm_model_list	model_id	atom_site	ihm_model_id	1
+entry	id	em_exptl	entry_id	1
+ihm_dataset_list	id	flr_fret_analysis	dataset_list_id	1
+entity	id	ihm_struct_assembly_details	entity_id	1
+
+query IT
+SELECT model_id, model_name FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/mmcif_extensions.cif', 'ihm_model_list') ORDER BY model_id;
+----
+1	Mixed model
+2	NULL
+
+query R
+SELECT resolution_high FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/mmcif_extensions.cif', 'em_exptl');
+----
+4.5
+
+query R
+SELECT FORSTER_RADIUS_VALUE FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/mmcif_extensions.cif', 'flr_fps_global_parameter');
+----
+52.5
+
+query T
+SELECT value FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/mmcif_extensions.cif', 'custom');
+----
+0123
+
+statement ok
+ATTACH '__WORKING_DIRECTORY__/test/data/mmcif_extensions.cif' AS extensions (TYPE mmcif);
+
+query T
+SHOW TABLES FROM extensions;
+----
+atom_site
+custom
+em_exptl
+em_map
+em_vitrification
+entity
+entry
+flr_fps_global_parameter
+flr_fret_analysis
+ihm_dataset_list
+ihm_model_list
+ihm_struct_assembly_details
+
+query TT
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name='extensions' AND table_name='ihm_model_list' ORDER BY column_index;
+----
+model_id	BIGINT
+model_name	VARCHAR
+
+query T
+SELECT comment FROM duckdb_tables() WHERE database_name='extensions' AND table_name='ihm_model_list';
+----
+https://mmcif.wwpdb.org/dictionaries/mmcif_ihm_ext.dic/Categories/ihm_model_list.html
+
+query T
+SELECT comment FROM duckdb_columns() WHERE database_name='extensions' AND table_name='atom_site' AND column_name='ihm_model_id';
+----
+https://mmcif.wwpdb.org/dictionaries/mmcif_ihm_ext.dic/Items/_atom_site.ihm_model_id.html
+
+query I
+SELECT model_id FROM extensions.ihm_model_list WHERE model_id > 1;
+----
+2
+
+statement ok
+DETACH extensions;
+
+# Selected-block writes and gzip reads use the same combined index.
+statement ok
+COPY (SELECT content FROM read_text('__WORKING_DIRECTORY__/test/data/mmcif_extensions.cif')) TO '__TEST_DIR__/extensions.cif.gz' (FORMAT CSV, HEADER false, QUOTE '', COMPRESSION gzip);
+
+statement ok
+ATTACH '__TEST_DIR__/extensions.cif.gz' AS extensions (TYPE mmcif, DATA_BLOCK 'other', READ_WRITE TRUE);
+
+statement ok
+UPDATE extensions.ihm_model_list SET model_id = model_id + 1;
+
+statement ok
+DETACH extensions;
+
+query IT
+SELECT model_id, model_name FROM mmcif_scan('__TEST_DIR__/extensions.cif.gz', 'ihm_model_list', data_block := 'other');
+----
+10	Other model
+
+query I
+SELECT sum(model_id) FROM mmcif_scan('__TEST_DIR__/extensions.cif.gz', 'ihm_model_list');
+----
+3
+
+query I
+SELECT count(*) FROM mmcif_relationships('__TEST_DIR__/extensions.cif.gz', data_block := 'other');
+----
+0
