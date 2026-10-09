@@ -1,0 +1,53 @@
+require mmcif
+
+# Dictionary row limits do not depend on the one observed row per category.
+query TI rowsort
+SELECT table_name, is_single_row::INTEGER FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/mmcif_category_metadata.cif');
+----
+atom_site	0
+cell	1
+custom	NULL
+entry	1
+struct	1
+struct_keywords	1
+struct_ref_seq	0
+symmetry	1
+
+# Preserve the existing columns and append correctly typed metadata, without keys.
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/mmcif_category_metadata.cif'));
+----
+table_name	VARCHAR
+comment	VARCHAR
+column_count	BIGINT
+is_single_row	BOOLEAN
+description	VARCHAR
+category_groups	VARCHAR[]
+is_mandatory	BOOLEAN
+
+query TTTI
+SELECT comment, replace(description, chr(10), '<newline>'), category_groups, is_mandatory::INTEGER
+FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/mmcif_category_metadata.cif') WHERE table_name = 'cell';
+----
+https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Categories/cell.html	Data items in the CELL category record details about the<newline>               crystallographic cell parameters.	[cell_group, inclusive_group]	0
+
+query IIII
+SELECT is_single_row IS NULL, description IS NULL, category_groups IS NULL, is_mandatory IS NULL
+FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/mmcif_category_metadata.cif') WHERE table_name = 'custom';
+----
+true	true	true	true
+
+# Metadata remains valid when the selected category has many rows.
+query I
+SELECT is_single_row::INTEGER FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/1amb_updated.cif') WHERE table_name = 'atom_site';
+----
+0
+
+# Category names are case insensitive, just like type metadata.
+statement ok
+COPY (SELECT 'data_upper' || chr(10) || '_CELL.entry_id upper' || chr(10) AS text) TO '__TEST_DIR__/mmcif_metadata_upper.cif' (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '');
+
+query IT
+SELECT is_single_row::INTEGER, category_groups FROM mmcif_tables('__TEST_DIR__/mmcif_metadata_upper.cif');
+----
+1	[cell_group, inclusive_group]

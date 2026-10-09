@@ -27,9 +27,11 @@ add_custom_command(
           ${MMCIF_GEN}/mmcif_dict_data.hpp
           ${CMAKE_CURRENT_SOURCE_DIR}/dict/mmcif_pdbx_v50_type_index.tsv.gz MMCIFF_TYPE_INDEX_GZ
           ${CMAKE_CURRENT_SOURCE_DIR}/dict/mmcif_pdbx_v50_relationships.tsv.gz MMCIFF_RELATIONSHIPS_GZ
+          ${CMAKE_CURRENT_SOURCE_DIR}/dict/mmcif_pdbx_v50_categories.tsv.gz MMCIFF_CATEGORIES_GZ
   DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/dict/mmcif_pdbx_v50_type_index.tsv.gz
     ${CMAKE_CURRENT_SOURCE_DIR}/dict/mmcif_pdbx_v50_relationships.tsv.gz
+    ${CMAKE_CURRENT_SOURCE_DIR}/dict/mmcif_pdbx_v50_categories.tsv.gz
   COMMENT "embedding mmcif dictionary artifacts"
   VERBATIM
 )
@@ -42,6 +44,7 @@ set(EXTENSION_SOURCES
   src/mmcif_index.cpp
   src/mmcif_write_store.cpp
   src/mmcif_dictionary.cpp
+  src/mmcif_category_metadata.cpp
   src/mmcif_patch.cpp
   src/mmcif_file.cpp
   src/mmcif_table_functions.cpp
