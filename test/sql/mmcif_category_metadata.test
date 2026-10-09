@@ -51,3 +51,11 @@ query IT
 SELECT is_single_row::INTEGER, category_groups FROM mmcif_tables('__TEST_DIR__/mmcif_metadata_upper.cif');
 ----
 1	[cell_group, inclusive_group]
+
+# Metadata also comes from the dictionaries merged for issue #18.
+query ITII
+SELECT is_single_row::INTEGER, category_groups, is_mandatory::INTEGER,
+       starts_with(description, 'Data items in the IHM_MODEL_LIST category')
+FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/mmcif_extensions.cif') WHERE table_name = 'ihm_model_list';
+----
+0	[ihm_group, inclusive_group]	0	true

@@ -54,7 +54,7 @@ curl -o test/data/1amb_updated.cif https://www.ebi.ac.uk/pdbe/entry-files/downlo
 
 - `src/` — extension sources
 - `modules/` — vendored RCSB `cpp-cif-parser` / `cpp-cif-file` core libraries
-- `dict/` — mmCIF dictionary type index used for column type inference
+- `dict/` — bundled dictionary types, relationships, documentation and category metadata
 - `test/sql/`, `test/data/` — SQLLogic tests and fixtures
 - `test/cpp/` — C++ Catch unit tests (run with `make test_cpp`)
 - `scripts/` — helper scripts (e.g. `mmcif_relationships_diagram.py`, which regenerates `rel.svg`)
@@ -65,43 +65,59 @@ curl -o test/data/1amb_updated.cif https://www.ebi.ac.uk/pdbe/entry-files/downlo
 
 See [docs/UPDATING.md](docs/UPDATING.md).
 
-## Updating the mmCIF dictionary
+## Updating the bundled dictionaries
 
-When a new [PDBx/mmCIF dictionary](https://mmcif.wwpdb.org/pdbx-mmcif-home-page.html) version is released:
+The extension embeds combined type, relationship and documentation indexes for
+PDBx/mmCIF v5, IHMCIF, flrCIF and 3DEM. Builds and queries never download or parse
+source dictionaries. `dict/sources.json` pins the source versions, URLs and
+SHA-256 checksums; the generator uses only Python's standard library.
 
-1. Open the [wwPDB dictionary downloads page](https://mmcif.wwpdb.org/dictionaries/downloads.html).
-   Under **PDB Exchange Dictionary (PDBx/mmCIF) Version 5.0**, select
-   **Dictionary Text** (not the gzipped download) and save the file as
-   `mmcif_pdbx_v50.dic`. Alternatively, download it from the command line:
-
-   ```sh
-   curl --fail --location \
-       --output mmcif_pdbx_v50.dic \
-       https://mmcif.wwpdb.org/dictionaries/ascii/mmcif_pdbx_v50.dic
-   ```
-
-2. Update the dictionary metadata and URLs:
-
-   - Set `DIC_VERSION` in `scripts/generate_type_index.py` to the version in the
-     downloaded dictionary.
-   - If the download location changed, update `SOURCE_URL` in that script.
-   - If the dictionary path or filename changed, replace the documentation base
-     URL (`https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic`) everywhere
-     it occurs. This URL is used to build catalog comments in
-     `src/mmcif_dictionary.cpp` and is also present in `README.md` and the
-     expected results in `test/sql/mmcif.test`.
-
-3. Regenerate both checked-in dictionary artifacts:
+1. Download all sources in the manifest to a local directory:
 
    ```sh
-   python3 scripts/generate_type_index.py \
-       mmcif_pdbx_v50.dic \
-       dict/mmcif_pdbx_v50_type_index.tsv.gz \
-       dict/mmcif_pdbx_v50_relationships.tsv.gz
+   mkdir -p .scratch/dictionaries
+   python3 - <<'PYTHON'
+   import json
+   from pathlib import Path
+   from urllib.request import urlopen
+
+   for source in json.loads(Path("dict/sources.json").read_text())["sources"]:
+       with urlopen(source["url"]) as response:
+           Path(".scratch/dictionaries", source["filename"]).write_bytes(response.read())
+   PYTHON
    ```
 
-4. Review the generated files and run `make test` and `make test_cpp` before
-   committing the script metadata and both files under `dict/` together.
+2. When intentionally updating a source, review its changes and update its
+   `version` and `sha256` in the manifest. The version is `_dictionary.version`
+   in the source; obtain the checksum with `sha256sum`. If its location or
+   dictionary browser changes, also update `url` or `documentation_url`.
+   Downloads from wwPDB can change; checksum mismatches intentionally stop
+   generation until the new source has been reviewed.
+
+3. Generate all four artifacts:
+
+   ```sh
+   python3 scripts/generate_type_index.py .scratch/dictionaries
+   ```
+
+   Saveframes, scalar fields and loop fields are parsed, including both
+   `_item_linked` and `_pdbx_item_linked_group_list` relationships. Duplicate
+   items and links are merged case-insensitively. Category metadata includes
+   descriptions, groups, mandatory codes and row limits derived from complete
+   category keys and their dictionary links. Category ownership follows the
+   same source priority as documentation. Documentation ownership
+   follows the manifest order: base, IHMCIF, flrCIF, 3DEM. This keeps base URLs
+   for shared definitions while linking extension-only items to their source.
+
+   Differing DuckDB types stop generation unless an exact resolution is
+   recorded in `type_conflicts`. Each resolution names every source's exposed
+   type, the source to use and the reason. The ten current conflicts retain the
+   PDBx/mmCIF v5 types over the standalone 3DEM definitions. Changed conflicts
+   and stale resolutions fail rather than silently changing behavior.
+
+4. Run `make test_dictionary`, `make test` and `make test_cpp`, then commit the
+   manifest and all four artifacts together. Generated gzip files omit
+   timestamps and local paths so regeneration is reproducible.
 
 ## AI Declaration
 

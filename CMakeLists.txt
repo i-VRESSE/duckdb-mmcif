@@ -25,13 +25,16 @@ add_custom_command(
   OUTPUT ${MMCIF_GEN}/mmcif_dict_data.hpp
   COMMAND ${CMAKE_COMMAND} -E env python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_artifact.py
           ${MMCIF_GEN}/mmcif_dict_data.hpp
-          ${CMAKE_CURRENT_SOURCE_DIR}/dict/mmcif_pdbx_v50_type_index.tsv.gz MMCIFF_TYPE_INDEX_GZ
-          ${CMAKE_CURRENT_SOURCE_DIR}/dict/mmcif_pdbx_v50_relationships.tsv.gz MMCIFF_RELATIONSHIPS_GZ
-          ${CMAKE_CURRENT_SOURCE_DIR}/dict/mmcif_pdbx_v50_categories.tsv.gz MMCIFF_CATEGORIES_GZ
+          ${CMAKE_CURRENT_SOURCE_DIR}/dict/mmcif_type_index.tsv.gz MMCIFF_TYPE_INDEX_GZ
+          ${CMAKE_CURRENT_SOURCE_DIR}/dict/mmcif_relationships.tsv.gz MMCIFF_RELATIONSHIPS_GZ
+          ${CMAKE_CURRENT_SOURCE_DIR}/dict/mmcif_documentation.tsv.gz MMCIFF_DOCUMENTATION_GZ
+          ${CMAKE_CURRENT_SOURCE_DIR}/dict/mmcif_categories.tsv.gz MMCIFF_CATEGORIES_GZ
   DEPENDS
-    ${CMAKE_CURRENT_SOURCE_DIR}/dict/mmcif_pdbx_v50_type_index.tsv.gz
-    ${CMAKE_CURRENT_SOURCE_DIR}/dict/mmcif_pdbx_v50_relationships.tsv.gz
-    ${CMAKE_CURRENT_SOURCE_DIR}/dict/mmcif_pdbx_v50_categories.tsv.gz
+    ${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_artifact.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/dict/mmcif_type_index.tsv.gz
+    ${CMAKE_CURRENT_SOURCE_DIR}/dict/mmcif_relationships.tsv.gz
+    ${CMAKE_CURRENT_SOURCE_DIR}/dict/mmcif_documentation.tsv.gz
+    ${CMAKE_CURRENT_SOURCE_DIR}/dict/mmcif_categories.tsv.gz
   COMMENT "embedding mmcif dictionary artifacts"
   VERBATIM
 )

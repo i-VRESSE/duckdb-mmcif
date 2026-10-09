@@ -1,6 +1,8 @@
 """Offline generator regression tests (python3 -m unittest discover -s test/python)."""
 import gzip
 import importlib.util
+import hashlib
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -111,8 +113,89 @@ save_
         self.assertIn(r"\nSecond line.", description)
         self.assertEqual(len(description.split("\t")), 3)
 
+    def test_incomplete_keys_and_unavailable_links_remain_unknown(self):
+        metadata = self.parse("""data_dictionary
+save_entry
+_category.id entry
+_category_key.name '_entry.id'
+save_
+save_partial
+_category.id partial
+loop_
+_category_key.name
+'_partial.ref' ?
+save_
+save__partial.ref
+_item.name '_partial.ref'
+_item_linked.child_name '_partial.ref'
+_item_linked.parent_name '_entry.id'
+save_
+save_unknown_link
+_category.id unknown_link
+_category_key.name '_unknown_link.id'
+save_
+save__unknown_link.id
+_item.name '_unknown_link.id'
+_item_linked.child_name '_unknown_link.id'
+_item_linked.parent_name ?
+save_
+""")
+        self.assertIsNone(metadata["partial"]["is_single_row"])
+        self.assertIsNone(metadata["unknown_link"]["is_single_row"])
+
+    def test_combined_metadata_priority_and_cross_dictionary_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            contents = {
+                "base.dic": """data_base
+_dictionary.version 1
+save_entry
+_category.id entry
+_category_key.name '_entry.id'
+_category.description 'Base description'
+save_
+save__entry.id
+_item.name '_entry.id'
+save_
+""",
+                "extension.dic": """data_extension
+_dictionary.version 1
+save_entry
+_category.id entry
+_category.description 'Extension description'
+save_
+save_extension
+_category.id extension
+_category_key.name '_extension.ref'
+_category_group.id extension_group
+save_
+save__extension.ref
+_item.name '_extension.ref'
+_item_linked.child_name '_extension.ref'
+_item_linked.parent_name '_entry.id'
+save_
+""",
+            }
+            sources = []
+            for name, content in contents.items():
+                path = root / name
+                path.write_text(content)
+                sources.append({"filename": name, "version": "1",
+                                "url": "https://example.org/" + name,
+                                "documentation_url": "https://example.org/" + name,
+                                "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+            manifest = root / "sources.json"
+            manifest.write_text(json.dumps({"sources": sources, "type_conflicts": {}}))
+            generator.generate(root, root / "output", manifest)
+            with gzip.open(root / "output/mmcif_categories.tsv.gz", "rt") as source:
+                rows = source.read()
+            self.assertIn("entry\tdescription\tBase description\n", rows)
+            self.assertNotIn("Extension description", rows)
+            self.assertIn("extension\tis_single_row\ttrue\n", rows)
+            self.assertIn("extension\tgroup\textension_group\n", rows)
+
     def test_shipped_metadata(self):
-        with gzip.open(ROOT / "dict/mmcif_pdbx_v50_categories.tsv.gz", "rt") as source:
+        with gzip.open(ROOT / "dict/mmcif_categories.tsv.gz", "rt") as source:
             rows = [line.rstrip("\n").split("\t") for line in source if not line.startswith("#")]
         flags = {category: value for category, field, value in rows if field == "is_single_row"}
         for category in ("entry", "cell", "struct", "struct_keywords", "symmetry"):
