@@ -11,7 +11,7 @@
 namespace duckdb {
 
 static void MmcifCoreLoad(ExtensionLoader &loader) {
-	// mmcif_scan, mmcif_tables, mmcif_columns, mmcif_relationships.
+	// mmcif_blocks, mmcif_scan, mmcif_tables, mmcif_columns, mmcif_relationships.
 	MmcifRegisterTableFunctions(loader);
 
 	// Storage extension (ATTACH 'file.cif').

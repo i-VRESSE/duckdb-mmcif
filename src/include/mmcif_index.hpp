@@ -25,6 +25,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -222,7 +223,7 @@ struct MmcifCategory {
 
 // ---------------------------------------------------------------------------
 // MmcifIndex: owns the decompressed content buffer + the pass-1 index.
-// Load() is process-level cached by path (re-attach reuses content + index).
+// Load() is process-level cached by path and block selection.
 // ---------------------------------------------------------------------------
 
 // The write model lives in mmcif_write_store.hpp; the seam between the index
@@ -232,18 +233,23 @@ class MmcifWriteStore;
 class MmcifIndex : public enable_shared_from_this<MmcifIndex> {
 public:
 	// Load (or fetch from the process-level cache) the index for a file.
-	static shared_ptr<MmcifIndex> Load(const string &path, optional_ptr<ClientContext> context);
+	static shared_ptr<MmcifIndex> Load(const string &path, optional_ptr<ClientContext> context,
+	                                   const std::optional<string> &data_block = std::nullopt);
 
 	// Drop the process-level cache entry for a path after the file on disk
 	// changes (e.g. after a write-mode COMMIT persists). The next Load re-reads.
 	static void InvalidateCache(const string &path);
 
 	// The seam between the read index and the write model: materialize the
-	// first data block as a mutable MmcifWriteStore (write mode).
+	// selected data block as a mutable MmcifWriteStore (write mode).
 	shared_ptr<MmcifWriteStore> Materialize();
 
 	const string &GetDataBlockName() const {
 		return data_block_name;
+	}
+
+	const vector<string> &GetDataBlockNames() const {
+		return data_block_names;
 	}
 
 	// Find a category by name (case-insensitive). Returns nullptr if absent.
@@ -269,10 +275,11 @@ public:
 private:
 	explicit MmcifIndex(string text_p) : text(std::move(text_p)) {
 	}
-	void Build();
+	void Build(const std::optional<string> &data_block);
 
 	string text; // decompressed mmCIF text (the flat string arena)
 
+	vector<string> data_block_names;
 	string data_block_name;
 	vector<unique_ptr<MmcifCategory>> categories;
 };
