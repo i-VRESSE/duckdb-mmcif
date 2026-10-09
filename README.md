@@ -64,7 +64,7 @@ DESCRIBE atom_site;
 
 ## Table functions
 
-Four global table functions work without attaching anything:
+Five global table functions work without attaching anything:
 
 ```sql
 -- one row per category with its dictionary documentation link and column count
@@ -83,7 +83,7 @@ SELECT * FROM mmcif_scan('1amb_updated.cif', 'atom_site');
 The category and item documentation links are also exposed as `comment` by
 `duckdb_tables()` and `duckdb_columns()` for attached mmCIF databases.
 
-Piping a file through stdin works too (like `read_csv`), for all four table functions:
+Piping a file through stdin works too (like `read_csv`), for all five table functions:
 
 ```sh
 cat 1amb_updated.cif | duckdb -c "SELECT * FROM mmcif_scan('/dev/stdin', 'atom_site')"
@@ -96,6 +96,30 @@ Entity/relationship diagram of the categories in `test/data/1amb_updated.cif`, a
       | dot -Tsvg -o rel.svg
 -->
 ![mmcif relationships diagram](rel.svg)
+
+## Multiple data blocks
+
+A file can contain multiple blocks, each beginning with `data_name` and ending
+at the next block or the end of the file. List their names in file order:
+
+```sql
+SELECT * FROM mmcif_blocks('structures.cif'); -- block_name (without data_)
+```
+
+Existing functions and `ATTACH` use the first block by default. Select another
+block by name (case-insensitive):
+
+```sql
+SELECT * FROM mmcif_scan('structures.cif', 'atom_site', data_block := 'model2');
+SELECT * FROM mmcif_tables('structures.cif', data_block := 'model2');
+SELECT * FROM mmcif_columns('structures.cif', data_block := 'model2');
+SELECT * FROM mmcif_relationships('structures.cif', data_block := 'model2');
+ATTACH 'structures.cif' AS model2 (TYPE mmcif, DATA_BLOCK 'model2');
+```
+
+Unknown or ambiguous block names produce an error. Gzip and remote reads support
+the same selection. `READ_WRITE TRUE` edits the selected block and preserves the
+other blocks verbatim.
 
 ## Ligands
 

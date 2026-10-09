@@ -1,0 +1,167 @@
+# name: test/sql/mmcif_blocks.test
+# description: Discover and select independent mmCIF data blocks
+# group: [sql]
+
+require mmcif
+
+query T
+SELECT * FROM mmcif_blocks('__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif');
+----
+first
+Second
+empty
+
+query T
+SELECT id FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif', 'entry');
+----
+first
+
+query T
+SELECT id FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif', 'entry', data_block := 'SECOND');
+----
+Second
+
+query T rowsort
+SELECT table_name FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif', data_block := 'Second');
+----
+entity
+entry
+struct
+struct_asym
+
+query T rowsort
+SELECT column_name FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif', data_block := 'Second') WHERE table_name = 'entity';
+----
+id
+type
+
+query I
+SELECT count(*) FROM mmcif_relationships('__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif', data_block := 'Second') WHERE parent_table = 'entity' AND child_table = 'struct_asym';
+----
+1
+
+query I
+SELECT count(*) FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif', data_block := 'empty');
+----
+0
+
+statement error
+SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif', 'entity');
+----
+category 'entity' not present in block 'first'
+
+statement error
+SELECT * FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif', data_block := 'missing');
+----
+data block 'missing' not present in file
+
+statement error
+SELECT * FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif', data_block := NULL);
+----
+data_block must be a non-NULL string
+
+statement error
+ATTACH '__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif' AS absent (TYPE mmcif, DATA_BLOCK 'missing');
+----
+data block 'missing' not present in file
+
+statement error
+ATTACH '__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif' AS absent (TYPE mmcif, DATA_BLOCK NULL);
+----
+NULL is not supported as a valid option for ATTACH option
+
+statement ok
+ATTACH '__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif' AS selected (TYPE mmcif, DATA_BLOCK 'Second');
+
+query T
+SELECT id FROM selected.entry;
+----
+Second
+
+# Different attachments to the same file resolve independent schemas.
+statement ok
+ATTACH '__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif' AS first_block (TYPE mmcif);
+
+query TT
+SELECT a.id, b.id FROM first_block.entry a CROSS JOIN selected.entry b;
+----
+first	Second
+
+statement ok
+DETACH first_block;
+
+statement ok
+DETACH selected;
+
+# Edit a later block, leaving the first block and the empty final block intact.
+statement ok
+COPY (SELECT content FROM read_text('__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif')) TO '__TEST_DIR__/mmcif_blocks_write.cif' (FORMAT CSV, HEADER false, QUOTE '');
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_blocks_write.cif' AS selected (TYPE mmcif, DATA_BLOCK 'Second', READ_WRITE TRUE);
+
+statement ok
+UPDATE selected.entry SET id = 'updated';
+
+statement ok
+INSERT INTO selected.entity VALUES (2, 'water');
+
+statement ok
+DETACH selected;
+
+query T
+SELECT id FROM mmcif_scan('__TEST_DIR__/mmcif_blocks_write.cif', 'entry', data_block := 'Second');
+----
+updated
+
+query T
+SELECT id FROM mmcif_scan('__TEST_DIR__/mmcif_blocks_write.cif', 'entry');
+----
+first
+
+query I
+SELECT count(*) FROM mmcif_scan('__TEST_DIR__/mmcif_blocks_write.cif', 'entity', data_block := 'Second');
+----
+2
+
+query T
+SELECT * FROM mmcif_blocks('__TEST_DIR__/mmcif_blocks_write.cif');
+----
+first
+Second
+empty
+
+# Gzip discovery and selection share the same decompressed block boundaries.
+statement ok
+COPY (SELECT content FROM read_text('__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif')) TO '__TEST_DIR__/mmcif_blocks.cif.gz' (FORMAT CSV, HEADER false, QUOTE '', COMPRESSION gzip);
+
+query T
+SELECT * FROM mmcif_blocks('__TEST_DIR__/mmcif_blocks.cif.gz');
+----
+first
+Second
+empty
+
+query T
+SELECT id FROM mmcif_scan('__TEST_DIR__/mmcif_blocks.cif.gz', 'entry', data_block := 'Second');
+----
+Second
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_blocks.cif.gz' AS selected (TYPE mmcif, DATA_BLOCK 'Second', READ_WRITE TRUE);
+
+statement ok
+DELETE FROM selected.entity;
+
+statement ok
+DETACH selected;
+
+query T
+SELECT id FROM mmcif_scan('__TEST_DIR__/mmcif_blocks.cif.gz', 'entry');
+----
+first
+
+query I
+SELECT count(*) FROM mmcif_scan('__TEST_DIR__/mmcif_blocks.cif.gz', 'entity', data_block := 'Second');
+----
+0

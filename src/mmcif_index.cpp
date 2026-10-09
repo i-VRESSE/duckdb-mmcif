@@ -17,7 +17,7 @@
 namespace duckdb {
 
 // ---------------------------------------------------------------------------
-// Process-level cache: keyed by path, re-attaching the same
+// Process-level cache: keyed by path and block selection, re-attaching the same
 // file in one DuckDB session reuses the decompressed content and the pass-1
 // index. Local files are invalidated when their stamp (see MmcifFileStamp)
 // changes; remote paths are cached by path only (may be stale).
@@ -28,7 +28,7 @@ struct MmcifCacheEntry {
 	string stamp; // MmcifFileStamp at load time; "" for remote paths
 };
 static mutex g_cache_lock;
-static unordered_map<string, MmcifCacheEntry> g_cache;
+static unordered_map<string, unordered_map<string, MmcifCacheEntry>> g_cache;
 
 // Stamp of a local file: identity (device/inode or volume/file index), size,
 // and sub-second modification and change times. The change time also moves
@@ -85,14 +85,19 @@ static bool MmcifFileChanged(const string &path, const string &loaded_stamp) {
 	return now.empty() || now != loaded_stamp; // missing file -> changed
 }
 
-shared_ptr<MmcifIndex> MmcifIndex::Load(const string &path, optional_ptr<ClientContext> context) {
+shared_ptr<MmcifIndex> MmcifIndex::Load(const string &path, optional_ptr<ClientContext> context,
+                                        optional_ptr<const string> data_block) {
+	const string key = data_block ? "1" + StringUtil::Lower(*data_block) : "0";
 	{
 		lock_guard<mutex> l(g_cache_lock);
 		auto it = g_cache.find(path);
 		if (it != g_cache.end()) {
-			auto cached = it->second.index.lock();
-			if (cached && !MmcifFileChanged(path, it->second.stamp)) {
-				return cached;
+			auto block_it = it->second.find(key);
+			if (block_it != it->second.end()) {
+				auto cached = block_it->second.index.lock();
+				if (cached && !MmcifFileChanged(path, block_it->second.stamp)) {
+					return cached;
+				}
 			}
 		}
 	}
@@ -105,10 +110,10 @@ shared_ptr<MmcifIndex> MmcifIndex::Load(const string &path, optional_ptr<ClientC
 		text = GZipFileSystem::UncompressGZIPString(text);
 	}
 	auto index = shared_ptr<MmcifIndex>(new MmcifIndex(std::move(text)));
-	index->Build();
+	index->Build(data_block);
 
 	lock_guard<mutex> l(g_cache_lock);
-	g_cache[path] = MmcifCacheEntry {weak_ptr<MmcifIndex>(index), std::move(stamp)};
+	g_cache[path][key] = MmcifCacheEntry {weak_ptr<MmcifIndex>(index), std::move(stamp)};
 	return index;
 }
 
@@ -135,7 +140,12 @@ static inline bool MmcifStartsWith(const char *base, idx_t start, idx_t end, con
 	if (end - start < (idx_t)n) {
 		return false;
 	}
-	return memcmp(base + start, word, n) == 0;
+	for (idx_t i = 0; i < n; i++) {
+		if (tolower(static_cast<unsigned char>(base[start + i])) != word[i]) {
+			return false;
+		}
+	}
+	return true;
 }
 
 // A bare token that is a tag or reserved word, not a value: the item before it
@@ -166,10 +176,47 @@ static idx_t MmcifSplitTag(const char *base, idx_t start, idx_t end, string &cat
 	return tag_end;
 }
 
-void MmcifIndex::Build() {
+void MmcifIndex::Build(optional_ptr<const string> data_block) {
 	const char *base = text.data();
 	idx_t size = text.size();
-	bool indexed = false; // keep only the FIRST data block
+	// Scan tokens so quoted values, comments and semicolon text fields cannot
+	// introduce false block boundaries. Keep offsets in the full source buffer
+	// so write-back can preserve every unselected block verbatim.
+	vector<idx_t> block_starts;
+	MmcifValueCursor blocks(base, 0, size);
+	const char *token;
+	idx_t len;
+	bool is_null;
+	while (blocks.Next(&token, &len, &is_null)) {
+		if (len >= 5 && MmcifStartsWith(token, 0, len, "data_")) {
+			data_block_names.emplace_back(token + 5, len - 5);
+			block_starts.push_back(token - base);
+		}
+	}
+	idx_t selected = 0;
+	if (data_block) {
+		bool found = false;
+		for (idx_t i = 0; i < data_block_names.size(); i++) {
+			if (StringUtil::CIEquals(data_block_names[i], *data_block)) {
+				if (found) {
+					throw InvalidInputException("mmcif: data block '%s' is ambiguous", *data_block);
+				}
+				selected = i;
+				found = true;
+			}
+		}
+		if (!found) {
+			throw InvalidInputException("mmcif: data block '%s' not present in file", *data_block);
+		}
+	}
+	idx_t block_start = 0;
+	if (!block_starts.empty()) {
+		data_block_name = data_block_names[selected];
+		block_start = block_starts[selected];
+		if (selected + 1 < block_starts.size()) {
+			size = MmcifLineStart(base, block_starts[selected + 1]);
+		}
+	}
 
 	enum State { TOP, LOOP_HEADER, LOOP_DATA };
 	State state = TOP;
@@ -200,7 +247,7 @@ void MmcifIndex::Build() {
 		return cur->columns.size() - 1;
 	};
 
-	idx_t line_start = 0;
+	idx_t line_start = block_start;
 	idx_t skip_to = 0; // when > line_end, the loop jumps to this line start
 	while (line_start < size) {
 		idx_t line_end = line_start;
@@ -276,13 +323,6 @@ void MmcifIndex::Build() {
 			} else if (MmcifStartsWith(base, s, line_end, "data_")) {
 				end_loop(line_start);
 				finalize();
-				if (indexed) {
-					// Later data blocks are ignored (keep-first-block behavior);
-					// the write-back patch keeps their bytes verbatim.
-					break;
-				}
-				data_block_name.assign(base + s + 5, (line_end - s) - 5);
-				indexed = true;
 			} else if (MmcifStartsWith(base, s, line_end, "save_")) {
 				// save_ frame (save_xxx ... save_): not indexed; stop the
 				// current loop. The write-back patch keeps its bytes verbatim.

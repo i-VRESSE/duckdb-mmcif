@@ -1,0 +1,27 @@
+# Block-looking strings in comments are not headers: data_comment
+DATA_first   # trailing comment
+_entry.id first
+_struct.title
+;
+data_text
+loop_
+;
+loop_
+_atom_site.id
+_atom_site.type_symbol
+1 C
+2 N
+
+data_Second
+_entry.id Second
+_struct.title 'data_quoted'
+loop_
+_entity.id
+_entity.type
+1 polymer
+loop_
+_struct_asym.id
+_struct_asym.entity_id
+A 1
+
+data_empty

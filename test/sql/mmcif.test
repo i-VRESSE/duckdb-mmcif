@@ -27,15 +27,17 @@ require mmcif
 query TTT
 SELECT function_name, parameters, parameter_types FROM duckdb_functions() WHERE function_name LIKE 'mmcif%' ORDER BY function_name;
 ----
-mmcif_columns	[file]	[VARCHAR]
-mmcif_relationships	[file]	[VARCHAR]
-mmcif_scan	[file, table]	[VARCHAR, VARCHAR]
-mmcif_tables	[file]	[VARCHAR]
+mmcif_blocks	[file]	[VARCHAR]
+mmcif_columns	[file, data_block]	[VARCHAR, VARCHAR]
+mmcif_relationships	[file, data_block]	[VARCHAR, VARCHAR]
+mmcif_scan	[file, table, data_block]	[VARCHAR, VARCHAR, VARCHAR]
+mmcif_tables	[file, data_block]	[VARCHAR, VARCHAR]
 
 query TIII
 SELECT function_name, (description IS NOT NULL)::INT, len(examples), len(categories)
 FROM duckdb_functions() WHERE function_name LIKE 'mmcif%' ORDER BY function_name;
 ----
+mmcif_blocks	1	1	1
 mmcif_columns	1	1	1
 mmcif_relationships	1	1	1
 mmcif_scan	1	1	1

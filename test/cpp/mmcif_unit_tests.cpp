@@ -751,3 +751,45 @@ TEST_CASE("MmcifPatch preserves comments inside deleted loop and key-value rows"
 		        "data_t" + eol + "# before value" + eol + "# between items" + eol + "_other.id keep" + eol);
 	}
 }
+
+namespace {
+
+shared_ptr<MmcifIndex> LoadBlock(const TempCif &cif, const string &name) {
+	return MmcifIndex::Load(cif.Str(), nullptr, &name);
+}
+
+} // namespace
+
+TEST_CASE("MmcifIndex selects blocks and patches only the selected block", "[mmcif][index][patch]") {
+	std::string first = "# data_comment\r\nDATA_First  # header\r\n_a.v first\r\n";
+	std::string second = "data_Second\r\nloop_\r\n_a.v\r\n'data_quoted'\r\n;\r\ndata_text\r\n;\r\n";
+	std::string last = "data_empty\r\n";
+	TempCif cif("mmcif_selected_block.cif", first + second + last);
+	auto index = LoadBlock(cif, "SECOND");
+	REQUIRE(index->GetDataBlockNames() == vector<string> {"First", "Second", "empty"});
+	REQUIRE(index->GetDataBlockName() == "Second");
+	REQUIRE(index->GetRowCount(*index->FindCategory("a")) == 2);
+	auto default_index = MmcifIndex::Load(cif.Str(), nullptr);
+	REQUIRE(default_index->GetDataBlockName() == "First");
+	REQUIRE(default_index != index);
+	REQUIRE(LoadBlock(cif, "second") == index);
+
+	auto store = index->Materialize();
+	auto cat = store->FindCategory("a");
+	store->UpdateCell(*cat, 0, 0, "changed");
+	auto patched = MmcifPatch::Apply(*store);
+	REQUIRE(patched.substr(0, first.size()) == first);
+	REQUIRE(patched.substr(patched.size() - last.size()) == last);
+	REQUIRE(patched.find("changed") != std::string::npos);
+	REQUIRE_THROWS_WITH(LoadBlock(cif, "missing"), Catch::Contains("not present in file"));
+}
+
+TEST_CASE("MmcifIndex supports unnamed blocks and rejects ambiguous selection", "[mmcif][index]") {
+	TempCif unnamed("mmcif_unnamed_blocks.cif", "data_\n_a.v unnamed\ndata_named\n_a.v named\n");
+	auto index = LoadBlock(unnamed, "");
+	REQUIRE(index->GetDataBlockName().empty());
+	REQUIRE(index->GetDataBlockNames().size() == 2);
+	TempCif duplicate("mmcif_duplicate_blocks.cif", "data_a\n_a.v one\ndata_A\n_a.v two\n");
+	REQUIRE(MmcifIndex::Load(duplicate.Str(), nullptr)->GetDataBlockNames().size() == 2);
+	REQUIRE_THROWS_WITH(LoadBlock(duplicate, "a"), Catch::Contains("ambiguous"));
+}

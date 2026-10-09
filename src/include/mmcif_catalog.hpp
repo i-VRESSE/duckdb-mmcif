@@ -107,9 +107,11 @@ public:
 
 class MmcifCatalog : public Catalog {
 public:
-	MmcifCatalog(AttachedDatabase &db_p, string path_p, bool write_mode_p, ClientContext &context);
+	MmcifCatalog(AttachedDatabase &db_p, string path_p, bool write_mode_p, ClientContext &context,
+	             unique_ptr<string> data_block_p = nullptr);
 
 	string path;
+	unique_ptr<string> data_block;
 	bool write_mode;
 	// Last committed write store (write mode only); guarded by write_lock.
 	shared_ptr<MmcifWriteStore> write_store;
