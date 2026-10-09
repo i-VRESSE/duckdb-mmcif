@@ -241,6 +241,9 @@ TableFunction MmcifTableEntry::GetScanFunction(ClientContext &context, unique_pt
 		for (auto &col : result->column_names) {
 			result->column_types.push_back(DictionaryIndex::Get().LookupType(table_name, col));
 		}
+	} else if (!catalog->indexes.empty()) {
+		*result = *catalog->category_binds.at(table_name);
+		result->table_entry = this;
 	} else {
 		// Read-only: shared lazy index, streamed scan. No materialization.
 		MmcifBindIndex(*result, catalog->GetIndex(&context), table_name);
@@ -264,6 +267,12 @@ TableStorageInfo MmcifTableEntry::GetStorageInfo(ClientContext &context) {
 	if (catalog->write_mode) {
 		auto cat = catalog->ReadStore(context)->FindCategory(table_name);
 		result.cardinality = cat ? cat->rows.size() : 0;
+	} else if (!catalog->indexes.empty()) {
+		idx_t cardinality = 0;
+		for (auto &file : catalog->category_binds.at(table_name)->files) {
+			cardinality += file.index->GetRowCount(*file.category);
+		}
+		result.cardinality = cardinality;
 	} else {
 		auto index = catalog->GetIndex(&context);
 		auto cat = index->FindCategory(table_name);
@@ -347,7 +356,13 @@ MmcifTableEntry &MmcifSchemaEntry::GetTableEntry(CatalogTransaction transaction,
 	auto &dict = DictionaryIndex::Get();
 	info.comment = Value(dict.GetCategoryUrl(entry_name));
 	for (auto &col : *columns) {
-		info.columns.AddColumn(MmcifColumnDefinition(dict, entry_name, col));
+		if (!catalog->indexes.empty() &&
+		    catalog->category_binds.at(entry_name)->filename_column != DConstants::INVALID_INDEX &&
+		    StringUtil::CIEquals(col, "filename")) {
+			info.columns.AddColumn(ColumnDefinition(col, LogicalType::VARCHAR));
+		} else {
+			info.columns.AddColumn(MmcifColumnDefinition(dict, entry_name, col));
+		}
 	}
 	auto entry = make_uniq<MmcifTableEntry>(ParentCatalog(), *this, info, entry_name, this->catalog);
 	auto *result = entry.get();
@@ -360,7 +375,8 @@ void MmcifSchemaEntry::Scan(ClientContext &context, CatalogType type,
 	if (type != CatalogType::TABLE_ENTRY) {
 		return; // mmcif exposes only tables
 	}
-	auto categories = catalog->GetIndex(&context)->GetCategoryNames();
+	auto categories =
+	    catalog->indexes.empty() ? catalog->GetIndex(&context)->GetCategoryNames() : catalog->category_names;
 	auto transaction = GetCatalogTransaction(context);
 	for (auto &category : categories) {
 		callback(GetTableEntry(transaction, category));
@@ -393,7 +409,28 @@ optional_ptr<CatalogEntry> MmcifSchemaEntry::LookupEntry(CatalogTransaction tran
 MmcifCatalog::MmcifCatalog(AttachedDatabase &db_p, string path_p, bool write_mode_p, ClientContext &context,
                            unique_ptr<string> data_block_p)
     : Catalog(db_p), path(std::move(path_p)), data_block(std::move(data_block_p)), write_mode(write_mode_p) {
-	if (write_mode || data_block) {
+	if (FileSystem::HasGlob(path)) {
+		if (write_mode) {
+			throw InvalidInputException(
+			    "mmcif: glob attachments are read-only; READ_WRITE requires one exact file path");
+		}
+		paths = MmcifExpandFiles(context, Value(path));
+		case_insensitive_set_t seen;
+		for (auto &file : paths) {
+			auto file_index = MmcifIndex::Load(file, &context, data_block.get());
+			for (auto &category : file_index->GetCategoryNames()) {
+				if (seen.insert(category).second) {
+					category_names.push_back(category);
+				}
+			}
+			indexes.push_back(std::move(file_index));
+		}
+		for (auto &category : category_names) {
+			auto bind = make_uniq<MmcifBindData>();
+			MmcifBindFiles(*bind, paths, indexes, category);
+			category_binds[category] = std::move(bind);
+		}
+	} else if (write_mode || data_block) {
 		index = MmcifIndex::Load(path, &context, data_block.get());
 		if (write_mode) {
 			write_store = index->Materialize();
@@ -402,6 +439,10 @@ MmcifCatalog::MmcifCatalog(AttachedDatabase &db_p, string path_p, bool write_mod
 }
 
 const std::vector<string> *MmcifCatalog::FindColumns(optional_ptr<ClientContext> context, const string &table_name) {
+	if (!indexes.empty()) {
+		auto it = category_binds.find(table_name);
+		return it == category_binds.end() ? nullptr : &it->second->column_names;
+	}
 	auto cat = GetIndex(context)->FindCategory(table_name);
 	return cat ? &cat->columns : nullptr;
 }

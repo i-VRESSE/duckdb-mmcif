@@ -1,0 +1,5 @@
+data_empty
+loop_
+_atom_site.id
+_atom_site.Cartn_x
+#

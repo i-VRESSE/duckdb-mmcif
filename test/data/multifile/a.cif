@@ -1,0 +1,8 @@
+data_a
+loop_
+_atom_site.id
+_atom_site.Cartn_x
+1 1.5
+2 2.5
+#
+_entry.id a

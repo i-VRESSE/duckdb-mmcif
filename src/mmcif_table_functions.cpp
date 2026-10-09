@@ -1,9 +1,8 @@
 // Per-category scan + metadata table functions module.
 //
-// MmcifBindData carries the parsed rows + dictionary types. Used both as the
-// global mmcif_scan(file, table) table function (bind reads the two VARCHAR
-// args) and as the attached-table scan (GetScanFunction pre-fills bind_data,
-// so bind is never called).
+// Global scans union category schemas across expanded paths and stream one
+// file at a time. Attached scans use the same reader or a transaction's write
+// store, with their bind data pre-filled by GetScanFunction.
 
 #include "mmcif_table_functions.hpp"
 
@@ -12,6 +11,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/common/numeric_utils.hpp"
+#include "duckdb/common/multi_file/multi_file_reader.hpp"
 #include "duckdb/common/operator/numeric_cast.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/typedefs.hpp"
@@ -40,30 +40,52 @@ bool MmcifBindData::Equals(const FunctionData &other) const {
 struct MmcifGlobalState : public GlobalTableFunctionState {
 	MmcifGlobalState(const MmcifBindData &bind_p, const vector<column_t> &column_ids_p)
 	    : bind(bind_p), column_ids(column_ids_p), position(0) {
-		if (bind.index && bind.category) {
-			ncols = bind.category->columns.size();
-			full_to_out.assign(ncols, DConstants::INVALID_INDEX);
-			for (idx_t c = 0; c < column_ids.size(); c++) {
-				auto col_id = column_ids[c];
-				if (col_id != COLUMN_IDENTIFIER_ROW_ID && col_id != COLUMN_IDENTIFIER_EMPTY && col_id < ncols) {
-					full_to_out[col_id] = c;
-				}
-			}
-			single_by_col.assign(ncols, nullptr);
-			for (auto &s : bind.category->singles) {
-				if (s.col < ncols) {
-					single_by_col[s.col] = &s;
-				}
-			}
-			if (bind.category->is_loop) {
-				cursor = make_uniq<MmcifValueCursor>(bind.index->GetData(), bind.category->data_start,
-				                                     bind.category->data_end);
-			}
+		if (!bind.files.empty()) {
+			StartFile(0);
+		} else if (bind.index && bind.category) {
+			StartCategory(bind.index, bind.category, nullptr);
 		}
 		if (bind.write_category) {
 			write_end = bind.write_category->rows.size();
 		}
 	}
+	void StartCategory(shared_ptr<MmcifIndex> index_p, MmcifCategory *category_p, const vector<idx_t> *mapping) {
+		index = std::move(index_p);
+		category = category_p;
+		position = 0;
+		done = single_done = false;
+		ncols = category->columns.size();
+		full_to_out.assign(ncols, DConstants::INVALID_INDEX);
+		out_to_full.assign(column_ids.size(), DConstants::INVALID_INDEX);
+		for (idx_t local = 0; local < ncols; local++) {
+			auto union_id = mapping ? (*mapping)[local] : local;
+			for (idx_t c = 0; c < column_ids.size(); c++) {
+				if (column_ids[c] == union_id) {
+					full_to_out[local] = c;
+					out_to_full[c] = local;
+				}
+			}
+		}
+		single_by_col.assign(ncols, nullptr);
+		for (auto &cell : category->singles) {
+			single_by_col[cell.col] = &cell;
+		}
+		cursor.reset();
+		if (category->is_loop) {
+			cursor = make_uniq<MmcifValueCursor>(index->GetData(), category->data_start, category->data_end);
+		}
+	}
+
+	void StartFile(idx_t file_idx) {
+		file_position = file_idx;
+		auto &file = bind.files[file_idx];
+		StartCategory(file.index, file.category, &file.local_to_union);
+	}
+
+	shared_ptr<MmcifIndex> index;
+	MmcifCategory *category = nullptr;
+	idx_t file_position = 0;
+	vector<idx_t> out_to_full;
 	const MmcifBindData &bind;
 	vector<column_t> column_ids;
 	idx_t position;
@@ -96,6 +118,58 @@ void MmcifBindIndex(MmcifBindData &result, shared_ptr<MmcifIndex> index, const s
 	}
 }
 
+vector<string> MmcifExpandFiles(ClientContext &context, const Value &input) {
+	auto reader = MultiFileReader::CreateDefault("mmcif");
+	vector<string> paths;
+	for (auto &file : reader->CreateFileList(context, input)->GetAllFiles()) {
+		paths.push_back(file.path);
+	}
+	return paths;
+}
+
+void MmcifBindFiles(MmcifBindData &result, const vector<string> &paths, const vector<shared_ptr<MmcifIndex>> &indexes,
+                    const string &table_name) {
+	case_insensitive_map_t<idx_t> columns;
+	for (idx_t i = 0; i < paths.size(); i++) {
+		auto category = indexes[i]->FindCategory(table_name);
+		if (!category || category->columns.empty()) {
+			continue;
+		}
+		MmcifScanFile file;
+		file.path = paths[i];
+		file.index = indexes[i];
+		file.category = category;
+		for (auto &name : category->columns) {
+			auto entry = columns.find(name);
+			if (entry == columns.end()) {
+				auto id = result.column_names.size();
+				columns[name] = id;
+				result.column_names.push_back(name);
+				result.column_types.push_back(DictionaryIndex::Get().LookupType(table_name, name));
+				file.local_to_union.push_back(id);
+			} else {
+				file.local_to_union.push_back(entry->second);
+			}
+		}
+		result.files.push_back(std::move(file));
+	}
+	if (result.files.empty()) {
+		if (indexes.size() == 1) {
+			// Preserve the single-file error, including the selected block name.
+			MmcifBindIndex(result, indexes[0], table_name);
+		}
+		throw BinderException("mmcif: category '%s' not present in any matched file", table_name);
+	}
+	if (paths.size() > 1) {
+		if (columns.find("filename") != columns.end()) {
+			throw BinderException("mmcif: category '%s' already contains a filename column", table_name);
+		}
+		result.filename_column = result.column_names.size();
+		result.column_names.push_back("filename");
+		result.column_types.push_back(LogicalType::VARCHAR);
+	}
+}
+
 static unique_ptr<string> MmcifDataBlock(TableFunctionBindInput &input) {
 	auto it = input.named_parameters.find("data_block");
 	if (it == input.named_parameters.end()) {
@@ -109,11 +183,16 @@ static unique_ptr<string> MmcifDataBlock(TableFunctionBindInput &input) {
 
 static unique_ptr<FunctionData> MmcifBind(ClientContext &context, TableFunctionBindInput &input,
                                           vector<LogicalType> &return_types, vector<string> &names) {
-	auto file_name = input.inputs[0].GetValue<string>();
+	auto paths = MmcifExpandFiles(context, input.inputs[0]);
 	auto table_name = input.inputs[1].GetValue<string>();
 	auto result = make_uniq<MmcifBindData>();
 
-	MmcifBindIndex(*result, MmcifIndex::Load(file_name, &context, MmcifDataBlock(input).get()), table_name);
+	auto data_block = MmcifDataBlock(input);
+	vector<shared_ptr<MmcifIndex>> indexes;
+	for (auto &path : paths) {
+		indexes.push_back(MmcifIndex::Load(path, &context, data_block.get()));
+	}
+	MmcifBindFiles(*result, paths, indexes, table_name);
 	names.assign(result->column_names.begin(), result->column_names.end());
 	return_types.assign(result->column_types.begin(), result->column_types.end());
 	return std::move(result);
@@ -130,7 +209,7 @@ static unique_ptr<GlobalTableFunctionState> MmcifInitGlobal(ClientContext &conte
 // pushdown falls out naturally: we stop after the requested rows are filled.
 static idx_t MmcifScanIndex(DataChunk &output, MmcifGlobalState &gstate, vector<unique_ptr<Vector>> &tmp,
                             vector<string_t *> &ptrs) {
-	auto &cat = *gstate.bind.category;
+	auto &cat = *gstate.category;
 	idx_t out_cols = output.ColumnCount();
 
 	idx_t count = 0;
@@ -189,9 +268,10 @@ static idx_t MmcifScanIndex(DataChunk &output, MmcifGlobalState &gstate, vector<
 			} else if (col_id == COLUMN_IDENTIFIER_EMPTY) {
 				output.data[c].SetValue(0, Value(true));
 			} else {
-				auto sc = (col_id < gstate.ncols) ? gstate.single_by_col[col_id] : nullptr;
+				auto local = gstate.out_to_full[c];
+				auto sc = local < gstate.ncols ? gstate.single_by_col[local] : nullptr;
 				if (sc && !sc->is_null) {
-					const char *value = gstate.bind.index->GetData() + sc->off;
+					const char *value = gstate.index->GetData() + sc->off;
 					idx_t len = sc->len;
 					MmcifUnquote(value, len);
 					ptrs[c][0] = string_t(value, UnsafeNumericCast<uint32_t>(len));
@@ -243,8 +323,29 @@ static void MmcifScan(ClientContext &context, TableFunctionInput &data, DataChun
 		tmp[c] = make_uniq<Vector>(LogicalType::VARCHAR);
 		ptrs[c] = FlatVector::GetData<string_t>(*tmp[c]);
 	}
-	idx_t count = gstate.bind.write_category ? MmcifScanStore(output, gstate, tmp, ptrs)
-	                                         : MmcifScanIndex(output, gstate, tmp, ptrs);
+	idx_t count;
+	while (true) {
+		// Missing union columns start as NULL for each file/chunk.
+		for (idx_t c = 0; c < out_cols; c++) {
+			FlatVector::Validity(*tmp[c]).SetAllValid(STANDARD_VECTOR_SIZE);
+			if (!gstate.bind.write_category && gstate.out_to_full[c] == DConstants::INVALID_INDEX) {
+				FlatVector::Validity(*tmp[c]).SetAllInvalid(STANDARD_VECTOR_SIZE);
+			}
+		}
+		count = gstate.bind.write_category ? MmcifScanStore(output, gstate, tmp, ptrs)
+		                                   : MmcifScanIndex(output, gstate, tmp, ptrs);
+		if (count || gstate.bind.files.empty() || gstate.file_position + 1 == gstate.bind.files.size()) {
+			break;
+		}
+		gstate.StartFile(gstate.file_position + 1);
+	}
+	if (gstate.bind.filename_column != DConstants::INVALID_INDEX) {
+		for (idx_t c = 0; c < out_cols; c++) {
+			if (gstate.column_ids[c] == gstate.bind.filename_column) {
+				tmp[c]->Reference(Value(gstate.bind.files[gstate.file_position].path));
+			}
+		}
+	}
 	for (idx_t c = 0; c < out_cols; c++) {
 		auto col_id = gstate.column_ids[c];
 		if (col_id == COLUMN_IDENTIFIER_ROW_ID || col_id == COLUMN_IDENTIFIER_EMPTY) {
@@ -398,14 +499,17 @@ static void MmcifRegisterDescribed(ExtensionLoader &loader, TableFunction functi
 		description += " Select a block with data_block := 'name'; defaults to the first block.";
 	}
 	FunctionDescription desc;
-	desc.parameter_types = function.arguments;
 	desc.parameter_names = std::move(parameter_names);
 	desc.description = std::move(description);
 	desc.examples = std::move(examples);
 	desc.categories = {"mmcif"};
-	CreateTableFunctionInfo info(std::move(function));
+	CreateTableFunctionInfo info(function.name == "mmcif_scan" ? MultiFileReader::CreateFunctionSet(std::move(function))
+	                                                           : TableFunctionSet(std::move(function)));
 	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
-	info.descriptions.push_back(std::move(desc));
+	for (auto &overload : info.functions.functions) {
+		desc.parameter_types = overload.arguments;
+		info.descriptions.push_back(desc);
+	}
 	loader.RegisterFunction(std::move(info));
 }
 
@@ -418,10 +522,11 @@ void MmcifRegisterTableFunctions(ExtensionLoader &loader) {
 	                       {"SELECT * FROM mmcif_blocks('structures.cif');"});
 
 	// mmcif_scan(file, table): scan one category of an mmCIF file as a table.
-	MmcifRegisterDescribed(loader, MmcifScanFunction(), {"file", "table"},
-	                       "Scan one mmCIF category as a table, reading its rows directly from a .cif or .cif.gz file.",
-	                       {"SELECT * FROM mmcif_scan('https://files.rcsb.org/download/1AMB.cif.gz', 'atom_site'); "
-	                        "-- 438 rows"});
+	MmcifRegisterDescribed(
+	    loader, MmcifScanFunction(), {"file", "table"},
+	    "Scan one mmCIF category from paths or globs, unioning columns by name with filename for multiple files.",
+	    {"SELECT * FROM mmcif_scan('https://files.rcsb.org/download/1AMB.cif.gz', 'atom_site'); "
+	     "-- 438 rows"});
 
 	// mmcif_tables(file): one row per category with its dictionary page and column count.
 	TableFunction mmcif_tables("mmcif_tables", {LogicalType::VARCHAR}, MmcifMetaScan, MmcifTablesBind,

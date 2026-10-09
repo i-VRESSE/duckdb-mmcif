@@ -1,0 +1,9 @@
+data_b
+loop_
+_atom_site.type_symbol
+_atom_site.ID
+O 3
+N 4
+#
+_entry.extra_b B
+_entry.ID b

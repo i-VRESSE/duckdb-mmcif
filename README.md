@@ -97,6 +97,40 @@ Entity/relationship diagram of the categories in `test/data/1amb_updated.cif`, a
 -->
 ![mmcif relationships diagram](rel.svg)
 
+## Multiple files
+
+Attach a glob to query categories across a collection of files:
+
+```sql
+ATTACH 'structures/*.cif*' AS cifs (TYPE mmcif);
+SELECT filename, count(*) FROM cifs.atom_site GROUP BY filename;
+```
+
+The attachment exposes the union of categories present in the matched files.
+Columns match by name (case-insensitive), with dictionary types and `NULL` for
+items missing from a file. Files without a queried category contribute no rows.
+When the glob matches multiple files, each table has a final `filename VARCHAR`
+column containing the concrete source path, even if the category occurs in only
+one file. A real category item named `filename` causes an error in this case.
+The file set and schemas are fixed at attach time; detach and reattach to pick up
+new files. Glob attachments are read-only; `READ_WRITE TRUE` requires an exact
+single-file path.
+
+Use `mmcif_scan` to read a category from a glob or an explicit list of paths/globs
+without attaching:
+
+```sql
+SELECT * FROM mmcif_scan('structures/*.cif*', 'atom_site');
+SELECT * FROM mmcif_scan(['first.cif', 'more/*.cif.gz'], 'atom_site');
+```
+
+These scans use the same column union and automatic `filename` behavior. A scan
+errors if no matched file contains the category, and a glob with no matches
+produces DuckDB's no-files error. Inputs resolving to one file keep the original
+schema without an automatic `filename`. Gzip files work alongside plain CIF.
+`DATA_BLOCK` on an attachment and `data_block` on a scan select the named block
+in every matched file; a file missing that block causes an error.
+
 ## Multiple data blocks
 
 A file can contain multiple blocks, each beginning with `data_name` and ending
