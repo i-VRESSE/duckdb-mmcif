@@ -86,7 +86,7 @@ static bool MmcifFileChanged(const string &path, const string &loaded_stamp) {
 }
 
 shared_ptr<MmcifIndex> MmcifIndex::Load(const string &path, optional_ptr<ClientContext> context,
-                                       const std::optional<string> &data_block) {
+                                        optional_ptr<const string> data_block) {
 	const string key = data_block ? "1" + StringUtil::Lower(*data_block) : "0";
 	{
 		lock_guard<mutex> l(g_cache_lock);
@@ -176,7 +176,7 @@ static idx_t MmcifSplitTag(const char *base, idx_t start, idx_t end, string &cat
 	return tag_end;
 }
 
-void MmcifIndex::Build(const std::optional<string> &data_block) {
+void MmcifIndex::Build(optional_ptr<const string> data_block) {
 	const char *base = text.data();
 	idx_t size = text.size();
 	// Scan tokens so quoted values, comments and semicolon text fields cannot

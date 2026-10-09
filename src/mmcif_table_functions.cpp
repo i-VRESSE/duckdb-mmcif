@@ -96,15 +96,15 @@ void MmcifBindIndex(MmcifBindData &result, shared_ptr<MmcifIndex> index, const s
 	}
 }
 
-static std::optional<string> MmcifDataBlock(TableFunctionBindInput &input) {
+static unique_ptr<string> MmcifDataBlock(TableFunctionBindInput &input) {
 	auto it = input.named_parameters.find("data_block");
 	if (it == input.named_parameters.end()) {
-		return std::nullopt;
+		return nullptr;
 	}
 	if (it->second.IsNull()) {
 		throw BinderException("mmcif: data_block must be a non-NULL string");
 	}
-	return it->second.GetValue<string>();
+	return make_uniq<string>(it->second.GetValue<string>());
 }
 
 static unique_ptr<FunctionData> MmcifBind(ClientContext &context, TableFunctionBindInput &input,
@@ -113,7 +113,7 @@ static unique_ptr<FunctionData> MmcifBind(ClientContext &context, TableFunctionB
 	auto table_name = input.inputs[1].GetValue<string>();
 	auto result = make_uniq<MmcifBindData>();
 
-	MmcifBindIndex(*result, MmcifIndex::Load(file_name, &context, MmcifDataBlock(input)), table_name);
+	MmcifBindIndex(*result, MmcifIndex::Load(file_name, &context, MmcifDataBlock(input).get()), table_name);
 	names.assign(result->column_names.begin(), result->column_names.end());
 	return_types.assign(result->column_types.begin(), result->column_types.end());
 	return std::move(result);
@@ -308,7 +308,7 @@ static void MmcifMetaScan(ClientContext &context, TableFunctionInput &data, Data
 
 // mmcif_blocks(file): names in file order, without the data_ prefix.
 static unique_ptr<FunctionData> MmcifBlocksBind(ClientContext &context, TableFunctionBindInput &input,
-                                               vector<LogicalType> &return_types, vector<string> &names) {
+                                                vector<LogicalType> &return_types, vector<string> &names) {
 	auto result = make_uniq<MmcifMetaBindData>();
 	auto index = MmcifIndex::Load(input.inputs[0].GetValue<string>(), &context);
 	for (auto &name : index->GetDataBlockNames()) {
@@ -324,7 +324,7 @@ static unique_ptr<FunctionData> MmcifTablesBind(ClientContext &context, TableFun
                                                 vector<LogicalType> &return_types, vector<string> &names) {
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto result = make_uniq<MmcifMetaBindData>();
-	auto index = MmcifIndex::Load(file_name, &context, MmcifDataBlock(input));
+	auto index = MmcifIndex::Load(file_name, &context, MmcifDataBlock(input).get());
 	auto &dictionary = DictionaryIndex::Get();
 	for (auto &cat : index->GetCategories()) {
 		result->rows.push_back({Value(cat->name), Value(dictionary.GetCategoryUrl(cat->name)),
@@ -340,7 +340,7 @@ static unique_ptr<FunctionData> MmcifColumnsBind(ClientContext &context, TableFu
                                                  vector<LogicalType> &return_types, vector<string> &names) {
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto result = make_uniq<MmcifMetaBindData>();
-	auto index = MmcifIndex::Load(file_name, &context, MmcifDataBlock(input));
+	auto index = MmcifIndex::Load(file_name, &context, MmcifDataBlock(input).get());
 	auto &dictionary = DictionaryIndex::Get();
 	for (auto &cat : index->GetCategories()) {
 		auto &category = cat->name;
@@ -371,7 +371,7 @@ static unique_ptr<FunctionData> MmcifRelationshipsBind(ClientContext &context, T
                                                        vector<LogicalType> &return_types, vector<string> &names) {
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto result = make_uniq<MmcifMetaBindData>();
-	auto index = MmcifIndex::Load(file_name, &context, MmcifDataBlock(input));
+	auto index = MmcifIndex::Load(file_name, &context, MmcifDataBlock(input).get());
 	auto categories = index->GetCategoryNames();
 	case_insensitive_set_t present(categories.begin(), categories.end());
 	for (auto &rel : DictionaryIndex::Get().GetRelationships()) {
@@ -411,7 +411,7 @@ static void MmcifRegisterDescribed(ExtensionLoader &loader, TableFunction functi
 
 void MmcifRegisterTableFunctions(ExtensionLoader &loader) {
 	TableFunction mmcif_blocks("mmcif_blocks", {LogicalType::VARCHAR}, MmcifMetaScan, MmcifBlocksBind,
-	                          MmcifMetaInitGlobal);
+	                           MmcifMetaInitGlobal);
 	mmcif_blocks.projection_pushdown = true;
 	MmcifRegisterDescribed(loader, std::move(mmcif_blocks), {"file"},
 	                       "List data block names in file order, without the data_ prefix.",

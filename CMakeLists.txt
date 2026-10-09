@@ -49,8 +49,6 @@ set(EXTENSION_SOURCES
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
-set_target_properties(${EXTENSION_NAME} ${LOADABLE_EXTENSION_NAME}
-  PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 
 add_dependencies(${EXTENSION_NAME} mmcif_dict_data)
 add_dependencies(${LOADABLE_EXTENSION_NAME} mmcif_dict_data)

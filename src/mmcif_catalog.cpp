@@ -391,10 +391,10 @@ optional_ptr<CatalogEntry> MmcifSchemaEntry::LookupEntry(CatalogTransaction tran
 // ---------------------------------------------------------------------------
 
 MmcifCatalog::MmcifCatalog(AttachedDatabase &db_p, string path_p, bool write_mode_p, ClientContext &context,
-                           std::optional<string> data_block_p)
+                           unique_ptr<string> data_block_p)
     : Catalog(db_p), path(std::move(path_p)), data_block(std::move(data_block_p)), write_mode(write_mode_p) {
 	if (write_mode || data_block) {
-		index = MmcifIndex::Load(path, &context, data_block);
+		index = MmcifIndex::Load(path, &context, data_block.get());
 		if (write_mode) {
 			write_store = index->Materialize();
 		}
@@ -409,7 +409,7 @@ const std::vector<string> *MmcifCatalog::FindColumns(optional_ptr<ClientContext>
 shared_ptr<MmcifIndex> MmcifCatalog::GetIndex(optional_ptr<ClientContext> context) {
 	lock_guard<mutex> l(index_lock);
 	if (!index) {
-		index = MmcifIndex::Load(path, context, data_block);
+		index = MmcifIndex::Load(path, context, data_block.get());
 	}
 	return index;
 }
@@ -660,13 +660,13 @@ static unique_ptr<Catalog> MmcifAttach(optional_ptr<StorageExtensionInfo> storag
 	if (write_mode && FileSystem::GetFileSystem(context).IsPipe(info.path)) {
 		throw InvalidInputException("mmcif: '%s' cannot be attached with READ_WRITE - pipes are read-only", info.path);
 	}
-	std::optional<string> data_block;
+	unique_ptr<string> data_block;
 	for (auto &entry : attach_options.options) {
 		if (StringUtil::CIEquals(entry.first, "data_block")) {
 			if (entry.second.IsNull() || entry.second.type() != LogicalType::VARCHAR) {
 				throw InvalidInputException("mmcif: DATA_BLOCK must be a non-NULL string");
 			}
-			data_block = entry.second.GetValue<string>();
+			data_block = make_uniq<string>(entry.second.GetValue<string>());
 		}
 	}
 	attach_options.options.erase("data_block");

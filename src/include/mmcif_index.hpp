@@ -25,7 +25,6 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -234,7 +233,7 @@ class MmcifIndex : public enable_shared_from_this<MmcifIndex> {
 public:
 	// Load (or fetch from the process-level cache) the index for a file.
 	static shared_ptr<MmcifIndex> Load(const string &path, optional_ptr<ClientContext> context,
-	                                   const std::optional<string> &data_block = std::nullopt);
+	                                   optional_ptr<const string> data_block = nullptr);
 
 	// Drop the process-level cache entry for a path after the file on disk
 	// changes (e.g. after a write-mode COMMIT persists). The next Load re-reads.
@@ -275,7 +274,7 @@ public:
 private:
 	explicit MmcifIndex(string text_p) : text(std::move(text_p)) {
 	}
-	void Build(const std::optional<string> &data_block);
+	void Build(optional_ptr<const string> data_block);
 
 	string text; // decompressed mmCIF text (the flat string arena)
 
