@@ -20,7 +20,8 @@ class DictionaryGenerationTests(unittest.TestCase):
             return generator.parse_dict(path)
 
     def test_scalar_and_loop_items_links_and_multiline_descriptions(self):
-        items, categories, links, version = self.parse("""data_test
+        items, categories, links, version = self.parse(
+            """data_test
 _dictionary.version '1.0'
 save_table
 _category.id table
@@ -55,7 +56,8 @@ loop_
 _pdbx_item_linked_group_list.child_name
 _pdbx_item_linked_group_list.parent_name
 '_child.ref' '_table.id'
-""")
+"""
+        )
         self.assertEqual(version, "1.0")
         self.assertEqual(items, {"_table.id": "VARCHAR", "_child.amount": "DOUBLE"})
         self.assertEqual(categories, {"table": "table"})
