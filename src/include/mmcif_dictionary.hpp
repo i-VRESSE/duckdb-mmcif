@@ -22,17 +22,21 @@ public:
 
 	// "_category.item" -> DuckDB type; unknown -> VARCHAR
 	LogicalType LookupType(const string &category, const string &column) const;
-	// Documentation page for a category in the bundled wwPDB v5.0 dictionary.
+	// Documentation page in the defining bundled dictionary (base or extension).
 	string GetCategoryUrl(const string &category) const;
-	// Documentation page for an item in the bundled wwPDB v5.0 dictionary.
+	// Documentation page for an item in its defining bundled dictionary.
 	string GetItemUrl(const string &category, const string &column) const;
 
 	const std::vector<std::pair<std::string, std::string>> &GetRelationships() const;
+	// Complete category item names, in stable dictionary-artifact order.
+	const vector<string> *GetColumns(const string &category) const;
 
 private:
 	DictionaryIndex();
 
 	case_insensitive_map_t<LogicalType> types;
+	case_insensitive_map_t<vector<string>> columns;
+	case_insensitive_map_t<string> documentation;
 	std::vector<std::pair<std::string, std::string>> relationships;
 };
 
