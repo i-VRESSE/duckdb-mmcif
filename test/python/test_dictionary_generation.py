@@ -20,8 +20,7 @@ class DictionaryGenerationTests(unittest.TestCase):
             return generator.parse_dict(path)
 
     def test_scalar_and_loop_items_links_and_multiline_descriptions(self):
-        items, categories, links, version = self.parse(
-            """data_test
+        items, categories, links, version = self.parse("""data_test
 _dictionary.version '1.0'
 save_table
 _category.id table
@@ -56,12 +55,19 @@ loop_
 _pdbx_item_linked_group_list.child_name
 _pdbx_item_linked_group_list.parent_name
 '_child.ref' '_table.id'
-"""
-        )
+""")
         self.assertEqual(version, "1.0")
         self.assertEqual(items, {"_table.id": "VARCHAR", "_child.amount": "DOUBLE"})
         self.assertEqual(categories, {"table": "table"})
         self.assertEqual(links, {("_table.id", "_child.ref"), ("_table.id", "_child.other")})
+
+    def test_ranges_and_lists_preserve_their_text(self):
+        for code in ("int-range", "float-range", "int_list"):
+            with self.subTest(code=code):
+                self.assertEqual(generator.duckdb_type(code), "VARCHAR")
+        self.assertEqual(generator.duckdb_type("int"), "BIGINT")
+        self.assertEqual(generator.duckdb_type("positive_int"), "BIGINT")
+        self.assertEqual(generator.duckdb_type("float"), "DOUBLE")
 
     def test_incomplete_loop_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Incomplete loop"):

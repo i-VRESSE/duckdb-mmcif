@@ -81,7 +81,8 @@ Only categories and columns present in the selected data block are exposed.
 The combined dictionary supplies types, documentation links and relationships,
 including links between extension categories and base categories. Catalog
 comments link to the dictionary defining each category or item. Unknown items
-keep the `VARCHAR` fallback.
+keep the `VARCHAR` fallback. Dictionary ranges and comma-separated integer
+lists also remain `VARCHAR` so values such as `3-174` are preserved.
 
 Shared definitions keep the current base dictionary's types and documentation;
 reviewed type conflicts are recorded in [`dict/sources.json`](dict/sources.json).

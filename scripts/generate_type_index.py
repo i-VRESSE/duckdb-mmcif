@@ -15,8 +15,9 @@ import io
 import json
 from pathlib import Path
 
-NUMERIC_FLOAT = {"float", "float-range"}
-NUMERIC_INT = {"int", "positive_int", "int_list", "int-range"}
+# Ranges and comma-separated lists are textual values, not scalar numbers.
+NUMERIC_FLOAT = {"float"}
+NUMERIC_INT = {"int", "positive_int"}
 
 
 def duckdb_type(code):
