@@ -714,9 +714,7 @@ void MmcifRegisterTableFunctions(ExtensionLoader &loader) {
 	    "Scan one mmCIF category from a file path, glob, or list of paths/globs. Plain CIF and gzip inputs are "
 	    "supported. Multiple matched files add a filename column containing the concrete source path.",
 	    {"SELECT * FROM mmcif_scan('https://files.rcsb.org/download/1AMB.cif.gz', 'atom_site');",
-	     "SELECT count(*) FROM mmcif_scan('structures/**/*.cif.gz', 'atom_site');",
-	     "SELECT filename, id FROM mmcif_scan(['first.cif', 'more/*.cif.gz'], 'entry');",
-	     "SELECT * FROM mmcif_scan('structures/*.cif', 'custom', column_source := 'files');"});
+	     "SELECT count(*) FROM mmcif_scan('structures/**/*.cif.gz', 'atom_site');"});
 
 	// mmcif_tables(file): one row per category with its dictionary page and column count.
 	TableFunction mmcif_tables("mmcif_tables", {LogicalType::VARCHAR}, MmcifMetaScan, MmcifTablesBind,

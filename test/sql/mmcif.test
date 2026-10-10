@@ -41,8 +41,8 @@ FROM duckdb_functions() WHERE function_name LIKE 'mmcif%' ORDER BY function_name
 mmcif_blocks	1	1	1
 mmcif_columns	1	1	1
 mmcif_relationships	1	1	1
-mmcif_scan	1	4	1
-mmcif_scan	1	4	1
+mmcif_scan	1	2	1
+mmcif_scan	1	2	1
 mmcif_tables	1	1	1
 
 # Global metadata table functions work without ATTACH
