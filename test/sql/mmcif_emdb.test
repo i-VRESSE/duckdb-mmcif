@@ -1,0 +1,43 @@
+# name: test/sql/mmcif_emdb.test
+# description: Real EMDB metadata preserves ranges and scans typed EM categories
+# group: [sql]
+
+require mmcif
+
+statement ok
+ATTACH '__WORKING_DIRECTORY__/test/data/emd-4404.cif.gz' AS emdb (TYPE mmcif);
+
+query TT
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name='emdb' AND table_name='em_image_scans' AND column_name IN ('frames_per_image', 'used_frames_per_image') ORDER BY column_name;
+----
+frames_per_image	BIGINT
+used_frames_per_image	VARCHAR
+
+query T
+SELECT pdb_chain_residue_range FROM emdb.em_3d_fitting_list ORDER BY id;
+----
+NULL
+3-174
+182-265
+NULL
+127-143
+
+query IT
+SELECT frames_per_image, used_frames_per_image FROM emdb.em_image_scans;
+----
+48	2-48
+
+query RI
+SELECT resolution, num_particles FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/emd-4404.cif.gz', 'em_3d_reconstruction');
+----
+3.93	64541
+
+# Materialize every column: count(*) alone could skip failing numeric casts.
+statement ok
+COPY (SELECT * FROM emdb.em_3d_fitting_list) TO '__TEST_DIR__/emdb_fitting.csv' (FORMAT CSV);
+
+statement ok
+COPY (SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/emd-4404.cif.gz', 'em_image_scans')) TO '__TEST_DIR__/emdb_scans.csv' (FORMAT CSV);
+
+statement ok
+DETACH emdb;
