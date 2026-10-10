@@ -1,106 +1,39 @@
 # name: test/sql/mmcif_multifile.test
-# description: Union categories across glob attachments and multi-file scans
+# description: Multi-file category scans with single-file attachments
 # group: [sql]
 
 require mmcif
 
-statement ok
+# Glob access is provided by table functions, including a single-match glob.
+statement error
 ATTACH '__WORKING_DIRECTORY__/test/data/multifile/*.cif' AS cifs (TYPE mmcif);
-
-query T rowsort
-SELECT table_name FROM duckdb_tables() WHERE database_name = 'cifs';
 ----
-atom_site
-entry
-struct
+ATTACH requires one exact file path; use mmcif_scan
 
-# Case-insensitive union, reordered columns, and typed missing values.
-query IRT rowsort
-SELECT id, Cartn_x, type_symbol FROM cifs.atom_site;
+statement error
+ATTACH '__WORKING_DIRECTORY__/test/data/multifile/*.cif' AS writable (TYPE mmcif, READ_WRITE TRUE);
 ----
-1	1.5	NULL
-2	2.5	NULL
-3	NULL	O
-4	NULL	N
+ATTACH requires one exact file path; use mmcif_scan
 
-query TI rowsort
-SELECT regexp_extract(filename, '[^/]+$'), count(*) FROM cifs.atom_site GROUP BY filename;
+statement error
+ATTACH '__WORKING_DIRECTORY__/test/data/multifile/a*.cif' AS one (TYPE mmcif);
 ----
-a.cif	2
-b.cif	2
+ATTACH requires one exact file path; use mmcif_scan
 
 query TT rowsort
-SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'cifs' AND table_name = 'atom_site';
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'atom_site'));
 ----
 Cartn_x	DOUBLE
 filename	VARCHAR
 id	VARCHAR
 type_symbol	VARCHAR
 
-query TT
-SELECT title, regexp_extract(filename, '[^/]+$') FROM cifs.struct;
-----
-Only in c	c.cif
-
 query TT rowsort
-SELECT id, regexp_extract(filename, '[^/]+$') FROM cifs.entry;
-----
-a	a.cif
-b	b.cif
-c	c.cif
-
-query TT rowsort
-SELECT id, extra_b FROM cifs.entry;
+SELECT id, extra_b FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'entry');
 ----
 a	NULL
 b	B
 c	NULL
-
-query II rowsort
-SELECT rowid, id FROM cifs.atom_site;
-----
-0	1
-0	3
-1	2
-1	4
-
-query T
-SELECT path LIKE '%/multifile/*.cif' FROM duckdb_databases() WHERE database_name = 'cifs';
-----
-true
-
-statement error
-INSERT INTO cifs.atom_site (id) VALUES (5);
-----
-read-only
-
-statement error
-UPDATE cifs.atom_site SET id = 5;
-----
-read-only
-
-statement error
-DELETE FROM cifs.atom_site;
-----
-read-only
-
-statement error
-CREATE TABLE cifs.extra (id INTEGER);
-----
-read-only
-
-statement ok
-DETACH cifs;
-
-statement error
-ATTACH '__WORKING_DIRECTORY__/test/data/multifile/*.cif' AS writable (TYPE mmcif, READ_WRITE TRUE);
-----
-glob attachments are read-only
-
-statement error
-ATTACH '__TEST_DIR__/no_such_mmcif_*.cif' AS missing (TYPE mmcif);
-----
-No files found
 
 query I
 SELECT count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'atom_site');
@@ -167,22 +100,11 @@ SELECT * FROM mmcif_scan('__TEST_DIR__/no_such_mmcif_*.cif', 'atom_site');
 ----
 No files found
 
-# Single-file scans and glob attachments matching one file keep their original schema.
+# Single-file scans keep their original schema.
 query I
 SELECT count(*) FROM (DESCRIBE SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/a.cif', 'atom_site')) WHERE column_name = 'filename';
 ----
 0
-
-statement ok
-ATTACH '__WORKING_DIRECTORY__/test/data/multifile/a*.cif' AS one (TYPE mmcif);
-
-query I
-SELECT count(*) FROM duckdb_columns() WHERE database_name = 'one' AND column_name = 'filename';
-----
-0
-
-statement ok
-DETACH one;
 
 # Plain and compressed sources share the same scan path.
 statement ok
@@ -202,23 +124,6 @@ SELECT id, count(*) FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/mmcif_bloc
 ----
 Second	2
 
-statement ok
-COPY (SELECT content FROM read_text('__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif')) TO '__TEST_DIR__/mmcif_multi_blocks.cif' (FORMAT CSV, HEADER false, QUOTE '');
-
-statement ok
-COPY (SELECT content FROM read_text('__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif')) TO '__TEST_DIR__/mmcif_multi_blocks.cif.gz' (FORMAT CSV, HEADER false, QUOTE '', COMPRESSION gzip);
-
-statement ok
-ATTACH '__TEST_DIR__/mmcif_multi_blocks.cif*' AS blocks (TYPE mmcif, DATA_BLOCK 'Second');
-
-query TI
-SELECT id, count(*) FROM blocks.entry GROUP BY id;
-----
-Second	2
-
-statement ok
-DETACH blocks;
-
 statement error
 SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'entry', data_block := 'missing');
 ----
@@ -233,14 +138,6 @@ SELECT * FROM mmcif_scan(['__TEST_DIR__/mmcif_multi_collision.cif', '__WORKING_D
 ----
 already contains a filename column
 
-statement ok
-COPY (SELECT content FROM read_text('__WORKING_DIRECTORY__/test/data/multifile/a.cif')) TO '__TEST_DIR__/mmcif_multi_collision_other.cif' (FORMAT CSV, HEADER false, QUOTE '');
-
-statement error
-ATTACH '__TEST_DIR__/mmcif_multi_collision*.cif' AS collision (TYPE mmcif);
-----
-already contains a filename column
-
 statement error
 SELECT * FROM mmcif_scan([]::VARCHAR[], 'atom_site');
 ----
@@ -251,47 +148,37 @@ SELECT * FROM mmcif_scan([NULL]::VARCHAR[], 'atom_site');
 ----
 cannot take NULL input
 
-# The attached file set and schema remain stable until detach/reattach.
-statement ok
-COPY (SELECT content FROM read_text('__WORKING_DIRECTORY__/test/data/multifile/a.cif')) TO '__TEST_DIR__/mmcif_snapshot_a.cif' (FORMAT CSV, HEADER false, QUOTE '');
-
-statement ok
-ATTACH '__TEST_DIR__/mmcif_snapshot_*.cif' AS snapshot (TYPE mmcif);
-
-statement ok
-COPY (SELECT content FROM read_text('__WORKING_DIRECTORY__/test/data/multifile/b.cif')) TO '__TEST_DIR__/mmcif_snapshot_b.cif' (FORMAT CSV, HEADER false, QUOTE '');
-
-query I
-SELECT count(*) FROM snapshot.atom_site;
-----
-2
-
-query I
-SELECT count(*) FROM duckdb_columns() WHERE database_name = 'snapshot' AND column_name IN ('filename', 'type_symbol');
-----
-0
-
-statement ok
-DETACH snapshot;
-
-statement ok
-ATTACH '__TEST_DIR__/mmcif_snapshot_*.cif' AS snapshot (TYPE mmcif);
-
-query I
-SELECT count(*) FROM snapshot.atom_site;
-----
-4
-
-query I
-SELECT count(DISTINCT filename) FROM snapshot.atom_site;
-----
-2
-
-statement ok
-DETACH snapshot;
-
 # Integration with the existing structure/ligand/block fixtures.
 query I
 SELECT count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/*.cif', 'atom_site');
 ----
 440
+
+# Resolution/deposition metadata joins preserve entries with missing categories.
+statement ok
+SET VARIABLE cif_files = '__WORKING_DIRECTORY__/test/data/multifile/*.cif';
+
+query TTRT
+WITH entries AS (
+    SELECT filename, min(id) AS id
+    FROM mmcif_scan(getvariable('cif_files'), 'entry')
+    GROUP BY filename
+), resolutions AS (
+    SELECT filename, min(ls_d_res_high) AS resolution
+    FROM mmcif_scan(getvariable('cif_files'), 'refine')
+    GROUP BY filename
+), deposits AS (
+    SELECT filename,
+           min(recvd_initial_deposition_date::DATE) AS deposit_date
+    FROM mmcif_scan(getvariable('cif_files'), 'pdbx_database_status')
+    GROUP BY filename
+)
+SELECT regexp_extract(e.filename, '[^/]+$'), e.id, r.resolution, d.deposit_date
+FROM entries e
+LEFT JOIN resolutions r USING (filename)
+LEFT JOIN deposits d USING (filename)
+ORDER BY e.filename;
+----
+a.cif	a	1.8	2020-01-02
+b.cif	b	3.0	NULL
+c.cif	c	NULL	2021-03-04

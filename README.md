@@ -99,37 +99,55 @@ Entity/relationship diagram of the categories in `test/data/1amb_updated.cif`, a
 
 ## Multiple files
 
-Attach a glob to query categories across a collection of files:
+Use `mmcif_scan` to read a category from a glob or an explicit list of paths/globs:
 
 ```sql
-ATTACH 'structures/*.cif*' AS cifs (TYPE mmcif);
-SELECT filename, count(*) FROM cifs.atom_site GROUP BY filename;
-```
-
-The attachment exposes the union of categories present in the matched files.
-Columns match by name (case-insensitive), with dictionary types and `NULL` for
-items missing from a file. Files without a queried category contribute no rows.
-When the glob matches multiple files, each table has a final `filename VARCHAR`
-column containing the concrete source path, even if the category occurs in only
-one file. A real category item named `filename` causes an error in this case.
-The file set and schemas are fixed at attach time; detach and reattach to pick up
-new files. Glob attachments are read-only; `READ_WRITE TRUE` requires an exact
-single-file path.
-
-Use `mmcif_scan` to read a category from a glob or an explicit list of paths/globs
-without attaching:
-
-```sql
-SELECT * FROM mmcif_scan('structures/*.cif*', 'atom_site');
+SELECT * FROM mmcif_scan('structures/**/*.cif.gz', 'atom_site');
 SELECT * FROM mmcif_scan(['first.cif', 'more/*.cif.gz'], 'atom_site');
 ```
 
-These scans use the same column union and automatic `filename` behavior. A scan
-errors if no matched file contains the category, and a glob with no matches
-produces DuckDB's no-files error. Inputs resolving to one file keep the original
-schema without an automatic `filename`. Gzip files work alongside plain CIF.
-`DATA_BLOCK` on an attachment and `data_block` on a scan select the named block
-in every matched file; a file missing that block causes an error.
+Columns match by name (case-insensitive), with dictionary types and typed `NULL`
+for items missing from a file. Files without the requested category contribute
+no rows. When the expanded input contains multiple files, the scan has a final
+`filename VARCHAR` column containing the concrete source path, even if only one
+file contains the category. A real category item named `filename` causes an error
+in this case. Inputs resolving to one file keep the original schema without an
+automatic `filename`.
+
+A scan errors if no matched file contains the category, and a glob with no matches
+produces DuckDB's no-files error. Gzip files work alongside plain CIF.
+`data_block := 'name'` selects that block in every matched file; a file missing
+that block causes an error.
+
+`ATTACH` requires one exact file path. Multi-file access is provided by
+`mmcif_scan`; the metadata functions (`mmcif_tables`, `mmcif_columns`,
+`mmcif_relationships`, and `mmcif_blocks`) take one file.
+
+To combine metadata from different categories, call `mmcif_scan` for each category
+and join on `filename`. For example, resolution comes from `refine` and deposition
+date from `pdbx_database_status`:
+
+```sql
+WITH resolutions AS (
+    SELECT filename, min(ls_d_res_high) AS resolution
+    FROM mmcif_scan('structures/**/*.cif.gz', 'refine')
+    GROUP BY filename
+), deposits AS (
+    SELECT filename, min(recvd_initial_deposition_date::DATE) AS deposit_date
+    FROM mmcif_scan('structures/**/*.cif.gz', 'pdbx_database_status')
+    GROUP BY filename
+)
+SELECT e.filename, e.id, r.resolution, d.deposit_date
+FROM mmcif_scan('structures/**/*.cif.gz', 'entry') e
+LEFT JOIN resolutions r USING (filename)
+LEFT JOIN deposits d USING (filename);
+```
+
+The glob should match multiple files for this filename-based join. Each queried
+category must occur in at least one matched file. Aggregate categories with
+multiple rows per file before joining to avoid multiplying results; left joins
+retain entries missing a resolution or deposition date. A runnable version lives
+in [`metadata_multiple.sql`](docs/examples/metadata_multiple.sql).
 
 ## Multiple data blocks
 
@@ -201,6 +219,7 @@ Ready-to-run example scripts live in [`docs/examples/`](docs/examples/):
 - [`keep_chain_A.sql`](docs/examples/keep_chain_A.sql) — filters an mmCIF file down to a single auth chain (chain A of `3PLZ`, downloaded from https://files.rcsb.org/download/3PLZ.cif.gz), deleting rows in every dependent category that do not belong to that chain. Uses `mmcif_relationships()` to work out which tables reference chains.
 - [`keep_chain_D2A.sql`](docs/examples/keep_chain_D2A.sql) — keeps only chain D of `3PLZ` and renames it to chain A (in both the auth and label chain-id namespaces), producing a plain chain-A file; a copy `3PLZ_D2A.cif.gz` is edited so the original is never touched.
 - [`spatial_atoms.sql`](docs/examples/spatial_atoms.sql) — 3D geometry analysis of `atom_site` coordinates with the [spatial extension](https://duckdb.org/docs/stable/core_extensions/spatial/overview.html): binding-pocket residues around the `3PLZ` inhibitor, chain–chain interface contacts, hydration shell, bounding box, rigid-body transforms, and Cα trace export.
+- [`metadata_multiple.sql`](docs/examples/metadata_multiple.sql) — joins category scans by filename to extract resolution and deposition date across a collection.
 - [`metadata.sql`](docs/examples/metadata.sql) — structure metadata as SQL (entry id, resolution, experimental method, software, label/auth chain mapping, residue counts, UniProt accession).
 - [`secondary_structure.sql`](docs/examples/secondary_structure.sql) — helix/sheet residue counts and ratios from `struct_conf` / `struct_sheet_range`.
 - [`confidence_filter.sql`](docs/examples/confidence_filter.sql) — AlphaFold pLDDT (B-iso) confidence counting and write-mode residue filtering.

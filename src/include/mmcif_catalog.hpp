@@ -38,7 +38,6 @@
 #include <vector>
 
 #include "mmcif_index.hpp"
-#include "mmcif_table_functions.hpp"
 #include "mmcif_write_store.hpp"
 
 namespace duckdb {
@@ -66,8 +65,8 @@ public:
 
 // ---------------------------------------------------------------------------
 // MmcifSchemaEntry: single schema; Scan(TABLE_ENTRY) enumerates the categories
-// present in the file collection; LookupEntry materializes a MmcifTableEntry.
-// Every DDL operation throws.
+// present in the file; LookupEntry materializes a MmcifTableEntry. Read-only:
+// every DDL operation throws.
 // ---------------------------------------------------------------------------
 
 class MmcifSchemaEntry : public SchemaCatalogEntry {
@@ -102,8 +101,7 @@ public:
 
 // ---------------------------------------------------------------------------
 // MmcifCatalog: SQLite-style custom Catalog. Single "main" schema. Read-only
-// by default; globs expose a frozen union of read-only category schemas.
-// Opened with an exact path and READ_WRITE TRUE it holds the committed
+// by default; opened with READ_WRITE TRUE it holds the committed
 // MmcifWriteStore, which transactions snapshot and replace on COMMIT.
 // ---------------------------------------------------------------------------
 
@@ -113,11 +111,6 @@ public:
 	             unique_ptr<string> data_block_p = nullptr);
 
 	string path;
-	// Glob attachments freeze their concrete file set and union schemas at attach.
-	vector<string> paths;
-	vector<shared_ptr<MmcifIndex>> indexes;
-	case_insensitive_map_t<unique_ptr<MmcifBindData>> category_binds;
-	vector<string> category_names;
 	unique_ptr<string> data_block;
 	bool write_mode;
 	// Last committed write store (write mode only); guarded by write_lock.

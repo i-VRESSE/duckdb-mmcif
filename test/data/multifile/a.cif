@@ -6,3 +6,9 @@ _atom_site.Cartn_x
 2 2.5
 #
 _entry.id a
+loop_
+_refine.ls_d_res_high
+2.0
+1.8
+#
+_pdbx_database_status.recvd_initial_deposition_date 2020-01-02
