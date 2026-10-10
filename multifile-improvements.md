@@ -12,8 +12,8 @@ Ranked by expected impact:
    Bind a known category from complete bundled dictionary columns and types,
    without opening every input. Open files as execution advances and release
    finished contents. This addresses startup latency and collection-sized RAM.
-   Start with an explicit `column_source := 'dictionary'` mode; preserve automatic
-   union discovery as the default. Reject custom category items in dictionary
+   Dictionary mode is now the default; keep automatic union discovery available
+   with explicit `column_source := 'files'`. Reject custom category items in dictionary
    mode with guidance to use discovery, rather than silently dropping data.
    Missing categories produce no rows; missing known columns produce typed NULL.
    Each active reader initially still loads one whole decompressed file.
@@ -60,7 +60,7 @@ Ranked by expected impact:
 - SQL tests pass (628 assertions), C++ tests pass (262 assertions), and three
   offline dictionary-generator tests pass. Repository formatting checks pass.
 
-Use the opt-in argument:
+Dictionary mode is now the default; the explicit argument remains supported:
 
 ```sql
 SELECT filename, id, Cartn_x
@@ -69,7 +69,7 @@ FROM mmcif_scan('/home/verhoes/.cache/protein-quest/**/*.cif.gz', 'atom_site',
 LIMIT 1;
 ```
 
-`column_source := 'files'` remains the default and discovers the union from
+`column_source := 'files'` is now an explicit compatibility option and discovers the union from
 input files. Dictionary mode exposes complete bundled category definitions,
 including 61 previously omitted valid items restored by fixing the generator.
 The source dictionary is version 5.417 and checksum-pinned; ordinary builds
@@ -232,3 +232,33 @@ input buffers. Each file is still fully decompressed and indexed; SQL operators
 and retained output can consume additional memory. Compact metadata caching,
 streaming within each file and compact file-based discovery remain separate
 follow-up improvements.
+
+## Default dictionary mode after merging PR #22
+
+PR #22 supplies combined PDBx/mmCIF, IHMCIF, flrCIF, 3DEM and ModelCIF artifacts.
+`mmcif_scan` now defaults to dictionary columns and lazy bounded parallel readers.
+Explicit `column_source := 'files'` retains union discovery for custom fields.
+ATTACH and metadata functions still expose the contents of one file.
+
+The corpus name audit found no unknown atom_site fields in any of the 6,397 files.
+Before ModelCIF was bundled, 5,119 files contained unsupported ModelCIF fields;
+835 other files contain additional struct_sheet_order fields. Dictionary errors
+apply only to the requested category, so those extra fields do not block atom_site
+queries. This is name/type compatibility, not mandatory-item or full validation.
+
+After the merge, the combined bundled type index contains 8,502 items. Comparing
+all previously parsed file tags against that artifact leaves exactly 30 unknown
+struct_sheet_order items in 835 files. The ModelCIF names are all covered.
+
+Verified default-mode scans with six threads over the complete collection:
+- atom_site: 49,203,033 rows and valid Cartn_x values, from all 6,397 files.
+- ma_qa_metric_global: 5,120 rows and valid metric_value values, from 5,119 files.
+The two queries together took 16.40 seconds with 211.5 MiB peak RSS in one fresh
+process; this is a combined smoke measurement, not the earlier count benchmark.
+
+The merged ModelCIF metadata tests exposed a concurrent catalog-entry cache
+race. Lookup and insertion now share a mutex so parallel catalog scans cannot
+replace a still-referenced table entry or corrupt the cache. Ten fresh attached
+catalogs exercise the simultaneous metadata scans in the regression suite.
+Final validation: 812 SQL assertions across eight cases, 262 C++ assertions
+across 37 cases, 11 offline Python tests, and the repository formatter passed.

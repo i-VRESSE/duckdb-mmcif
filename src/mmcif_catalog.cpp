@@ -329,6 +329,9 @@ static ColumnDefinition MmcifColumnDefinition(DictionaryIndex &dictionary, const
 }
 
 MmcifTableEntry &MmcifSchemaEntry::GetTableEntry(CatalogTransaction transaction, const string &entry_name) {
+	// Parallel duckdb_tables/duckdb_columns scans can populate this cache
+	// concurrently. Protect lookup and insertion so entries stay unique/alive.
+	lock_guard<mutex> guard(tables_lock);
 	// Cache: reuse an existing entry instead of replacing it. Scans keep a raw
 	// pointer to the returned MmcifTableEntry in their bind data; replacing the
 	// map entry would free that object while still referenced (e.g. a DELETE

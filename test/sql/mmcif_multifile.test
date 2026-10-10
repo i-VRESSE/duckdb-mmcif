@@ -1,5 +1,5 @@
 # name: test/sql/mmcif_multifile.test
-# description: Multi-file category scans with single-file attachments
+# description: Explicit file-discovery unions with single-file attachments
 # group: [sql]
 
 require mmcif
@@ -21,7 +21,7 @@ ATTACH '__WORKING_DIRECTORY__/test/data/multifile/a*.cif' AS one (TYPE mmcif);
 ATTACH requires one exact file path; use mmcif_scan
 
 query TT rowsort
-SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'atom_site'));
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'atom_site', column_source := 'files'));
 ----
 Cartn_x	DOUBLE
 filename	VARCHAR
@@ -29,19 +29,19 @@ id	VARCHAR
 type_symbol	VARCHAR
 
 query TT rowsort
-SELECT id, extra_b FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'entry');
+SELECT id, extra_b FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'entry', column_source := 'files');
 ----
 a	NULL
 b	B
 c	NULL
 
 query I
-SELECT count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'atom_site');
+SELECT count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'atom_site', column_source := 'files');
 ----
 4
 
 query IRT rowsort
-SELECT id, Cartn_x, type_symbol FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'atom_site');
+SELECT id, Cartn_x, type_symbol FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'atom_site', column_source := 'files');
 ----
 1	1.5	NULL
 2	2.5	NULL
@@ -50,7 +50,7 @@ SELECT id, Cartn_x, type_symbol FROM mmcif_scan('__WORKING_DIRECTORY__/test/data
 
 # Explicit lists preserve file order. An exhausted empty loop must not end the scan.
 query I
-SELECT id FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/empty.cif', '__WORKING_DIRECTORY__/test/data/multifile/b.cif', '__WORKING_DIRECTORY__/test/data/multifile/a.cif'], 'atom_site');
+SELECT id FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/empty.cif', '__WORKING_DIRECTORY__/test/data/multifile/b.cif', '__WORKING_DIRECTORY__/test/data/multifile/a.cif'], 'atom_site', column_source := 'files');
 ----
 3
 4
@@ -58,7 +58,7 @@ SELECT id FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/empty.cif'
 2
 
 query T rowsort
-SELECT type_symbol FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/a.cif', '__WORKING_DIRECTORY__/test/data/multifile/b.cif'], 'atom_site');
+SELECT type_symbol FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/a.cif', '__WORKING_DIRECTORY__/test/data/multifile/b.cif'], 'atom_site', column_source := 'files');
 ----
 N
 NULL
@@ -66,18 +66,18 @@ NULL
 O
 
 query TI rowsort
-SELECT regexp_extract(filename, '[^/]+$'), count(*) FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/[ab].cif', '__WORKING_DIRECTORY__/test/data/multifile/c*.cif'], 'atom_site') GROUP BY filename;
+SELECT regexp_extract(filename, '[^/]+$'), count(*) FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/[ab].cif', '__WORKING_DIRECTORY__/test/data/multifile/c*.cif'], 'atom_site', column_source := 'files') GROUP BY filename;
 ----
 a.cif	2
 b.cif	2
 
 query TT
-SELECT title, regexp_extract(filename, '[^/]+$') FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'struct');
+SELECT title, regexp_extract(filename, '[^/]+$') FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'struct', column_source := 'files');
 ----
 Only in c	c.cif
 
 query I
-SELECT id FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'atom_site') LIMIT 1;
+SELECT id FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'atom_site', column_source := 'files') LIMIT 1;
 ----
 1
 
@@ -86,23 +86,23 @@ statement ok
 COPY (SELECT 'data_large' || chr(10) || 'loop_' || chr(10) || '_atom_site.id' || chr(10) || string_agg(i::VARCHAR, chr(10) ORDER BY i) AS content FROM range(5000) t(i)) TO '__TEST_DIR__/mmcif_multi_large.cif' (FORMAT CSV, HEADER false, QUOTE '');
 
 query III
-SELECT count(*), sum(id::BIGINT), count(Cartn_x) FROM mmcif_scan(['__TEST_DIR__/mmcif_multi_large.cif', '__WORKING_DIRECTORY__/test/data/multifile/a.cif'], 'atom_site');
+SELECT count(*), sum(id::BIGINT), count(Cartn_x) FROM mmcif_scan(['__TEST_DIR__/mmcif_multi_large.cif', '__WORKING_DIRECTORY__/test/data/multifile/a.cif'], 'atom_site', column_source := 'files');
 ----
 5002	12497503	2
 
 statement error
-SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'absent');
+SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'absent', column_source := 'files');
 ----
 not present in any matched file
 
 statement error
-SELECT * FROM mmcif_scan('__TEST_DIR__/no_such_mmcif_*.cif', 'atom_site');
+SELECT * FROM mmcif_scan('__TEST_DIR__/no_such_mmcif_*.cif', 'atom_site', column_source := 'files');
 ----
 No files found
 
 # Single-file scans keep their original schema.
 query I
-SELECT count(*) FROM (DESCRIBE SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/a.cif', 'atom_site')) WHERE column_name = 'filename';
+SELECT count(*) FROM (DESCRIBE SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/a.cif', 'atom_site', column_source := 'files')) WHERE column_name = 'filename';
 ----
 0
 
@@ -111,7 +111,7 @@ statement ok
 COPY (SELECT content FROM read_text('__WORKING_DIRECTORY__/test/data/multifile/b.cif')) TO '__TEST_DIR__/mmcif_multi_b.cif.gz' (FORMAT CSV, HEADER false, QUOTE '', COMPRESSION gzip);
 
 query IRT rowsort
-SELECT id, Cartn_x, type_symbol FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/a.cif', '__TEST_DIR__/mmcif_multi_b.cif.gz'], 'atom_site');
+SELECT id, Cartn_x, type_symbol FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/a.cif', '__TEST_DIR__/mmcif_multi_b.cif.gz'], 'atom_site', column_source := 'files');
 ----
 1	1.5	NULL
 2	2.5	NULL
@@ -120,12 +120,12 @@ SELECT id, Cartn_x, type_symbol FROM mmcif_scan(['__WORKING_DIRECTORY__/test/dat
 
 # Apply block selection to every file in the input.
 query TI rowsort
-SELECT id, count(*) FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif', '__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif'], 'entry', data_block := 'Second') GROUP BY id;
+SELECT id, count(*) FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif', '__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif'], 'entry', data_block := 'Second', column_source := 'files') GROUP BY id;
 ----
 Second	2
 
 statement error
-SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'entry', data_block := 'missing');
+SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'entry', data_block := 'missing', column_source := 'files');
 ----
 data block 'missing' not present in file
 
@@ -134,25 +134,25 @@ statement ok
 COPY (SELECT 'data_collision' || chr(10) || '_atom_site.FILENAME collision') TO '__TEST_DIR__/mmcif_multi_collision.cif' (FORMAT CSV, HEADER false, QUOTE '');
 
 statement error
-SELECT * FROM mmcif_scan(['__TEST_DIR__/mmcif_multi_collision.cif', '__WORKING_DIRECTORY__/test/data/multifile/a.cif'], 'atom_site');
+SELECT * FROM mmcif_scan(['__TEST_DIR__/mmcif_multi_collision.cif', '__WORKING_DIRECTORY__/test/data/multifile/a.cif'], 'atom_site', column_source := 'files');
 ----
 already contains a filename column
 
 statement error
-SELECT * FROM mmcif_scan([]::VARCHAR[], 'atom_site');
+SELECT * FROM mmcif_scan([]::VARCHAR[], 'atom_site', column_source := 'files');
 ----
 needs at least one file to read
 
 statement error
-SELECT * FROM mmcif_scan([NULL]::VARCHAR[], 'atom_site');
+SELECT * FROM mmcif_scan([NULL]::VARCHAR[], 'atom_site', column_source := 'files');
 ----
 cannot take NULL input
 
 # Integration with the existing structure/ligand/block fixtures.
 query I
-SELECT count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/*.cif', 'atom_site');
+SELECT count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/*.cif', 'atom_site', column_source := 'files');
 ----
-440
+441
 
 # Resolution/deposition metadata joins preserve entries with missing categories.
 statement ok
@@ -161,16 +161,16 @@ SET VARIABLE cif_files = '__WORKING_DIRECTORY__/test/data/multifile/*.cif';
 query TTRT
 WITH entries AS (
     SELECT filename, min(id) AS id
-    FROM mmcif_scan(getvariable('cif_files'), 'entry')
+    FROM mmcif_scan(getvariable('cif_files'), 'entry', column_source := 'files')
     GROUP BY filename
 ), resolutions AS (
     SELECT filename, min(ls_d_res_high) AS resolution
-    FROM mmcif_scan(getvariable('cif_files'), 'refine')
+    FROM mmcif_scan(getvariable('cif_files'), 'refine', column_source := 'files')
     GROUP BY filename
 ), deposits AS (
     SELECT filename,
            min(recvd_initial_deposition_date::DATE) AS deposit_date
-    FROM mmcif_scan(getvariable('cif_files'), 'pdbx_database_status')
+    FROM mmcif_scan(getvariable('cif_files'), 'pdbx_database_status', column_source := 'files')
     GROUP BY filename
 )
 SELECT regexp_extract(e.filename, '[^/]+$'), e.id, r.resolution, d.deposit_date

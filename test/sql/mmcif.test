@@ -209,7 +209,7 @@ statement ok
 COPY (SELECT 'data_p' || chr(10) || 'loop_' || chr(10) || '_p.a' || chr(10) || '_p.b' || chr(10) || '1 2' || chr(10) || '3') TO '__TEST_DIR__/mmcif_partial.cif' (FORMAT CSV, HEADER 0, QUOTE '');
 
 query II
-SELECT * FROM mmcif_scan('__TEST_DIR__/mmcif_partial.cif', 'p');
+SELECT * FROM mmcif_scan('__TEST_DIR__/mmcif_partial.cif', 'p', column_source := 'files');
 ----
 1	2
 3	NULL
@@ -897,12 +897,12 @@ statement ok
 COPY (SELECT concat_ws(chr(10), 'data_q', '_s.id 1', '_s.title', '''long title on the next line''', '_s.note ''q'' # comment', '_s.empty', '_s.year 2000', 'loop_', '_l.id', '_l.name', '_l.text', '1 ''it''s'' ;x', '2 "C1''"', ';', 'line one', '', '_not.a_tag', ';', '3 .5 ok')) TO '__TEST_DIR__/mmcif_values.cif' (FORMAT CSV, HEADER 0, QUOTE '');
 
 query IIIII
-SELECT * FROM mmcif_scan('__TEST_DIR__/mmcif_values.cif', 's');
+SELECT * FROM mmcif_scan('__TEST_DIR__/mmcif_values.cif', 's', column_source := 'files');
 ----
 1	long title on the next line	q	NULL	2000
 
 query III
-SELECT id, name, replace(text, chr(10), '|') FROM mmcif_scan('__TEST_DIR__/mmcif_values.cif', 'l');
+SELECT id, name, replace(text, chr(10), '|') FROM mmcif_scan('__TEST_DIR__/mmcif_values.cif', 'l', column_source := 'files');
 ----
 1	it's	;x
 2	C1'	|line one||_not.a_tag
@@ -948,7 +948,7 @@ SELECT contains(content, E'_s.title\nnew\n_s.note ''q'' # comment\n_s.empty e\n'
 1
 
 query IIIII
-SELECT * FROM mmcif_scan('__TEST_DIR__/mmcif_values.cif', 's');
+SELECT * FROM mmcif_scan('__TEST_DIR__/mmcif_values.cif', 's', column_source := 'files');
 ----
 1	new	q	e	2000
 

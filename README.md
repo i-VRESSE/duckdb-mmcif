@@ -121,22 +121,19 @@ for items missing from a file. Files without the requested category contribute
 no rows. When the expanded input contains multiple files, the scan has a final
 `filename VARCHAR` column containing the concrete source path, even if only one
 file contains the category. A real category item named `filename` causes an error
-in this case. Inputs resolving to one file keep the original schema without an
-automatic `filename`.
+in this case. Inputs resolving to one file do not add an automatic `filename`.
 
-A scan errors if no matched file contains the category, and a glob with no matches
-produces DuckDB's no-files error. Gzip files work alongside plain CIF.
+A known category absent from every matched file returns a typed empty result.
+A glob with no matches produces DuckDB's no-files error. Gzip files work alongside plain CIF.
 `data_block := 'name'` selects that block in every matched file; a file missing
 that block causes an error.
 
-By default, `column_source := 'files'` discovers the union of columns by reading
-all matched files before returning rows. For large collections of dictionary
-categories, use the bundled definitions to avoid that discovery pass:
+By default, `column_source := 'dictionary'` uses the bundled PDBx/mmCIF, IHMCIF,
+flrCIF, 3DEM and ModelCIF definitions without reading file contents during binding:
 
 ```sql
 SELECT filename, id, Cartn_x
-FROM mmcif_scan('structures/**/*.cif.gz', 'atom_site',
-                column_source := 'dictionary')
+FROM mmcif_scan('structures/**/*.cif.gz', 'atom_site')
 LIMIT 10;
 ```
 
@@ -151,6 +148,14 @@ file is read. Glob expansion still happens before execution, and each active
 file is fully decompressed and indexed, so memory depends on its size. Multiple
 category scans each read their input independently.
 
+For custom categories/items or only the columns present in your files, opt into
+`column_source := 'files'`. It reads all inputs during binding, discovers their
+column union and retains their indexes. It errors if no file contains the category.
+`SELECT *` in default dictionary mode includes every defined column; attached
+tables and metadata functions still expose only columns present in the file.
+Unknown items in unrelated categories do not block a scan. These checks cover
+known names and projected value casts, not full dictionary validation.
+
 Enable DuckDB's terminal progress bar for long scans:
 
 ```sql
@@ -160,7 +165,7 @@ SET progress_bar_time = 1000;
 
 Scans report completed files, including files without the requested category in
 dictionary mode. Files have equal weight, so large files can make the bar pause.
-The callback reports execution progress; glob expansion and default file-based
+The callback reports execution progress; glob expansion and explicit file-based
 column discovery happen during binding and have no progress feedback.
 
 Use a single scan for parallel aggregates:

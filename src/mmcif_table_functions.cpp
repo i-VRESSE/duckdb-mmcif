@@ -266,7 +266,7 @@ static unique_ptr<FunctionData> MmcifBind(ClientContext &context, TableFunctionB
 
 	auto data_block = MmcifDataBlock(input);
 	auto column_source = input.named_parameters.find("column_source");
-	string column_source_mode = "files";
+	string column_source_mode = "dictionary";
 	if (column_source != input.named_parameters.end()) {
 		if (column_source->second.IsNull()) {
 			throw BinderException("mmcif: column_source must be 'files' or 'dictionary', not NULL");
@@ -680,7 +680,8 @@ static void MmcifRegisterDescribed(ExtensionLoader &loader, TableFunction functi
 	}
 	if (function.name == "mmcif_scan") {
 		parameter_names.push_back("column_source");
-		description += " Use column_source := 'dictionary' to bind known dictionary columns and open files lazily.";
+		description += " Bind bundled dictionary columns and open files lazily by default. Use column_source := "
+		               "'files' for custom items and file-based column discovery.";
 	}
 	FunctionDescription desc;
 	desc.parameter_names = std::move(parameter_names);

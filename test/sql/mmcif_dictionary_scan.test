@@ -1,17 +1,17 @@
 # name: test/sql/mmcif_dictionary_scan.test
-# description: Dictionary schema binding and lazy per-file scans
+# description: Default dictionary column binding and lazy per-file scans
 # group: [sql]
 
 require mmcif
 
 # Fixed dictionary types and union mappings, including previously omitted id.
 query T
-SELECT column_type FROM (DESCRIBE SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'atom_site', column_source := 'dictionary')) WHERE column_name = 'id';
+SELECT column_type FROM (DESCRIBE SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'atom_site')) WHERE column_name = 'id';
 ----
 VARCHAR
 
 query T
-SELECT column_type FROM (DESCRIBE SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'atom_site', column_source := 'dictionary')) WHERE column_name = 'label_seq_id';
+SELECT column_type FROM (DESCRIBE SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'atom_site')) WHERE column_name = 'label_seq_id';
 ----
 BIGINT
 
@@ -24,25 +24,25 @@ SELECT id, Cartn_x, type_symbol FROM mmcif_scan('__WORKING_DIRECTORY__/test/data
 4	NULL	N
 
 query TI rowsort
-SELECT regexp_extract(filename, '[^/]+$'), count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'atom_site', column_source := 'dictionary') GROUP BY filename;
+SELECT regexp_extract(filename, '[^/]+$'), count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'atom_site') GROUP BY filename;
 ----
 a.cif	2
 b.cif	2
 
 query I
-SELECT count(label_seq_id) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'atom_site', column_source := 'dictionary');
+SELECT count(label_seq_id) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'atom_site');
 ----
 0
 
 # Single-tag values, skipped files and file-local projection remapping.
 query TT
-SELECT title, regexp_extract(filename, '[^/]+$') FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/a.cif', '__WORKING_DIRECTORY__/test/data/multifile/c.cif'], 'struct', column_source := 'dictionary');
+SELECT title, regexp_extract(filename, '[^/]+$') FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/a.cif', '__WORKING_DIRECTORY__/test/data/multifile/c.cif'], 'struct');
 ----
 Only in c	c.cif
 
 # Empty loop first, then a reordered file and another file.
 query I
-SELECT id FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/empty.cif', '__WORKING_DIRECTORY__/test/data/multifile/b.cif', '__WORKING_DIRECTORY__/test/data/multifile/a.cif'], 'atom_site', column_source := 'dictionary');
+SELECT id FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/empty.cif', '__WORKING_DIRECTORY__/test/data/multifile/b.cif', '__WORKING_DIRECTORY__/test/data/multifile/a.cif'], 'atom_site');
 ----
 3
 4
@@ -51,28 +51,28 @@ SELECT id FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/empty.cif'
 
 # A known category can be absent everywhere and still has a typed schema.
 query I
-SELECT count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'cell', column_source := 'dictionary');
+SELECT count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'cell');
 ----
 0
 
 query I
-SELECT count(*) FROM (DESCRIBE SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/a.cif', 'cell', column_source := 'dictionary')) WHERE column_name = 'length_a' AND column_type = 'DOUBLE';
+SELECT count(*) FROM (DESCRIBE SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/a.cif', 'cell')) WHERE column_name = 'length_a' AND column_type = 'DOUBLE';
 ----
 1
 
 query I
-SELECT count(*) FROM (DESCRIBE SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/a.cif', 'atom_site', column_source := 'dictionary')) WHERE column_name = 'filename';
+SELECT count(*) FROM (DESCRIBE SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/a.cif', 'atom_site')) WHERE column_name = 'filename';
 ----
 0
 
 statement error
-SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'custom', column_source := 'dictionary');
+SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'custom');
 ----
 not in the bundled dictionary; use column_source := 'files'
 
 # An unknown item is rejected even when it is not projected, rather than lost.
 statement error
-SELECT id FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/b.cif', 'entry', column_source := 'dictionary');
+SELECT id FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/b.cif', 'entry');
 ----
 item 'entry.extra_b'
 
@@ -96,19 +96,19 @@ statement ok
 COPY (SELECT 'data_bad' || chr(10) || '_atom_site.custom_item invalid') TO '__TEST_DIR__/mmcif_dictionary_bad.cif' (FORMAT CSV, HEADER false, QUOTE '');
 
 query T
-SELECT id FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/a.cif', '__TEST_DIR__/mmcif_dictionary_bad.cif'], 'atom_site', column_source := 'dictionary') LIMIT 1;
+SELECT id FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/a.cif', '__TEST_DIR__/mmcif_dictionary_bad.cif'], 'atom_site') LIMIT 1;
 ----
 1
 
 query T
-SELECT id FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/a.cif', '__TEST_DIR__/mmcif_dictionary_bad.cif'], 'atom_site', column_source := 'dictionary') LIMIT 0;
+SELECT id FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/a.cif', '__TEST_DIR__/mmcif_dictionary_bad.cif'], 'atom_site') LIMIT 0;
 ----
 
 statement ok
-EXPLAIN SELECT * FROM mmcif_scan('__TEST_DIR__/mmcif_dictionary_bad.cif', 'atom_site', column_source := 'dictionary');
+EXPLAIN SELECT * FROM mmcif_scan('__TEST_DIR__/mmcif_dictionary_bad.cif', 'atom_site');
 
 statement error
-SELECT count(*) FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/a.cif', '__TEST_DIR__/mmcif_dictionary_bad.cif'], 'atom_site', column_source := 'dictionary');
+SELECT count(*) FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/a.cif', '__TEST_DIR__/mmcif_dictionary_bad.cif'], 'atom_site');
 ----
 not in the bundled dictionary
 
@@ -117,18 +117,18 @@ statement ok
 COPY (SELECT content FROM read_text('__WORKING_DIRECTORY__/test/data/multifile/b.cif')) TO '__TEST_DIR__/mmcif_dictionary_b.cif.gz' (FORMAT CSV, HEADER false, QUOTE '', COMPRESSION gzip);
 
 query I
-SELECT count(*) FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/a.cif', '__TEST_DIR__/mmcif_dictionary_b.cif.gz'], 'atom_site', column_source := 'dictionary');
+SELECT count(*) FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/a.cif', '__TEST_DIR__/mmcif_dictionary_b.cif.gz'], 'atom_site');
 ----
 4
 
 query T rowsort
-SELECT id FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif', '__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif'], 'entry', data_block := 'Second', column_source := 'dictionary');
+SELECT id FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif', '__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif'], 'entry', data_block := 'Second');
 ----
 Second
 Second
 
 statement error
-SELECT count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif', 'entry', data_block := 'missing', column_source := 'dictionary');
+SELECT count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif', 'entry', data_block := 'missing');
 ----
 data block 'missing' not present in file
 
@@ -138,14 +138,14 @@ COPY (SELECT 'data_large' || chr(10) || 'loop_' || chr(10) || '_atom_site.label_
 
 query I
 WITH rows AS MATERIALIZED (
-    SELECT label_atom_id FROM mmcif_scan(['__TEST_DIR__/mmcif_dictionary_large.cif', '__TEST_DIR__/mmcif_dictionary_large.cif'], 'atom_site', column_source := 'dictionary')
+    SELECT label_atom_id FROM mmcif_scan(['__TEST_DIR__/mmcif_dictionary_large.cif', '__TEST_DIR__/mmcif_dictionary_large.cif'], 'atom_site')
 )
 SELECT count(*) FROM rows WHERE label_atom_id = 'long_atom_name_4321';
 ----
 2
 
 query III
-SELECT count(*), count(DISTINCT label_atom_id), count(Cartn_x) FROM mmcif_scan(['__TEST_DIR__/mmcif_dictionary_large.cif', '__WORKING_DIRECTORY__/test/data/multifile/a.cif'], 'atom_site', column_source := 'dictionary');
+SELECT count(*), count(DISTINCT label_atom_id), count(Cartn_x) FROM mmcif_scan(['__TEST_DIR__/mmcif_dictionary_large.cif', '__WORKING_DIRECTORY__/test/data/multifile/a.cif'], 'atom_site');
 ----
 5002	5000	2
 
@@ -155,8 +155,39 @@ COPY (SELECT 'data_title' || chr(10) || '_struct.title a_long_title_that_must_ou
 
 query I
 WITH titles AS MATERIALIZED (
-    SELECT title FROM mmcif_scan(['__TEST_DIR__/mmcif_dictionary_title.cif', '__WORKING_DIRECTORY__/test/data/multifile/c.cif'], 'struct', column_source := 'dictionary')
+    SELECT title FROM mmcif_scan(['__TEST_DIR__/mmcif_dictionary_title.cif', '__WORKING_DIRECTORY__/test/data/multifile/c.cif'], 'struct')
 )
 SELECT count(*) FROM titles WHERE title = 'a_long_title_that_must_outlive_the_file_arena';
 ----
 1
+
+# Explicit dictionary mode and the default expose identical definitions.
+query I
+SELECT count(*) FROM (
+    (SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/a.cif', 'atom_site'))
+     EXCEPT SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/a.cif', 'atom_site', column_source := 'dictionary')))
+    UNION ALL
+    (SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/a.cif', 'atom_site', column_source := 'dictionary'))
+     EXCEPT SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/a.cif', 'atom_site')))
+);
+----
+0
+
+# Unknown categories elsewhere do not block reading a known category.
+statement ok
+COPY (SELECT 'data_mixed' || chr(10) || '_entry.id mixed' || chr(10) || '_custom.value extra') TO '__TEST_DIR__/mmcif_default_mixed.cif' (FORMAT CSV, HEADER false, QUOTE '');
+
+query T
+SELECT id FROM mmcif_scan('__TEST_DIR__/mmcif_default_mixed.cif', 'entry');
+----
+mixed
+
+statement error
+SELECT * FROM mmcif_scan('__TEST_DIR__/mmcif_default_mixed.cif', 'custom');
+----
+not in the bundled dictionary; use column_source := 'files'
+
+query T
+SELECT value FROM mmcif_scan('__TEST_DIR__/mmcif_default_mixed.cif', 'custom', column_source := 'files');
+----
+extra

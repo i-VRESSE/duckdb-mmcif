@@ -46,7 +46,7 @@ SELECT count(*) FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/mmcif_blocks.
 0
 
 statement error
-SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif', 'entity');
+SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/mmcif_blocks.cif', 'entity', column_source := 'files');
 ----
 category 'entity' not present in block 'first'
 
