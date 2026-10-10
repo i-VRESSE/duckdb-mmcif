@@ -1,4 +1,7 @@
-# Dictionary extension ER diagrams
+# Regenerating dictionary ER diagrams
+
+See [dictionary extensions](../dictionary-extensions.md) for dictionary explanations
+and the rendered extension diagrams.
 
 The SVGs show the relationships returned by `mmcif_relationships()` for real
 archive examples: IHMCIF (8ZZE), flrCIF (9A08) and EMDB/3DEM (EMD-4404).

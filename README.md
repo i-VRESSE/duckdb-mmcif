@@ -68,26 +68,8 @@ The extension bundles the current PDBx/mmCIF v5 dictionary together with
 **IHMCIF**, **flrCIF** and **3DEM**. All are available by default: no dictionary
 selection or downloads are needed when opening a file.
 
-```sql
-ATTACH 'integrative_model.cif' AS model (TYPE mmcif);
-SHOW TABLES FROM model;
-SELECT * FROM model.ihm_model_list;
--- Or discover and scan categories without attaching:
-SELECT * FROM mmcif_tables('integrative_model.cif');
-SELECT * FROM mmcif_scan('integrative_model.cif', 'ihm_model_list');
-```
-
-Only categories and columns present in the selected data block are exposed.
-The combined dictionary supplies types, documentation links and relationships,
-including links between extension categories and base categories. Catalog
-comments link to the dictionary defining each category or item. Unknown items
-keep the `VARCHAR` fallback. Dictionary ranges and comma-separated integer
-lists also remain `VARCHAR` so values such as `3-174` are preserved.
-
-Shared definitions keep the current base dictionary's types and documentation;
-reviewed type conflicts are recorded in [`dict/sources.json`](dict/sources.json).
-That manifest also records bundled dictionary versions and source checksums.
-Older and alternative base dictionaries are not bundled.
+See [dictionary extensions](docs/dictionary-extensions.md) for usage, dictionary
+coverage and ER diagrams from real archive examples.
 
 ## Table functions
 
@@ -123,41 +105,6 @@ Entity/relationship diagram of the categories in `test/data/1amb_updated.cif`, a
       | dot -Tsvg -o docs/diagrams/pdbx.svg
 -->
 ![mmcif relationships diagram](docs/diagrams/pdbx.svg)
-
-The following diagrams show only categories defined by each extension and
-present in the downloaded archive example, with relationships between those
-categories. The flrCIF diagram focuses on `flr_*` categories and excludes
-inherited IHMCIF categories.
-
-<details>
-<summary>IHMCIF — PDB-IHM entry 8ZZE</summary>
-
-Source: [8ZZE CIF](https://pdb-ihm.org/cif/8zze.cif).
-
-![IHMCIF relationships in PDB-IHM entry 8ZZE](docs/diagrams/ihm.svg)
-
-</details>
-
-<details>
-<summary>flrCIF — FRET entry 9A08</summary>
-
-Source: [9A08 CIF](https://pdb-ihm.org/cif/9a08.cif).
-
-![flrCIF relationships in FRET entry 9A08](docs/diagrams/flr.svg)
-
-</details>
-
-<details>
-<summary>3DEM — EMDB entry EMD-4404</summary>
-
-Source: [EMD-4404 experimental metadata](https://ftp.ebi.ac.uk/pub/databases/emdb/structures/EMD-4404/metadata/emd-4404.cif.gz).
-This entry's EM categories are included in the current PDBx/mmCIF base dictionary.
-
-![3DEM relationships in EMDB entry EMD-4404](docs/diagrams/3dem.svg)
-
-</details>
-
-See [diagram generation instructions](docs/diagrams/README.md) to regenerate these examples.
 
 ## Multiple data blocks
 
