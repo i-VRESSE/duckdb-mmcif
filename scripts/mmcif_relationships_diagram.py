@@ -16,11 +16,13 @@ Examples:
 import argparse
 import csv
 import io
+import json
 import os
 import shutil
 import subprocess
 import sys
 from collections import defaultdict
+from html import escape
 
 
 def find_duckdb(explicit):
@@ -96,19 +98,19 @@ def render_dot(rows):
     print("digraph mmcif_relationships {")
     print("    rankdir=LR")
     print("    graph [fontname=Helvetica, nodesep=0.4, ranksep=1.2]")
-    print('    node [shape=none, margin=0, fontname=Helvetica]')
-    print('    edge [fontname=Helvetica, fontsize=10, arrowhead=crow]')
+    print("    node [shape=none, margin=0, fontname=Helvetica]")
+    print("    edge [fontname=Helvetica, fontsize=10, arrowhead=crow]")
     for table in tables:
-        print(f'    {table} [label=<')
-        print("      <table border=\"0\" cellspacing=\"0\" cellborder=\"1\">")
-        print(f"        <tr><td bgcolor=\"lightgrey\" ><b>{table}</b></td></tr>")
+        print(f"    {json.dumps(table)} [label=<")
+        print('      <table border="0" cellspacing="0" cellborder="1">')
+        print(f'        <tr><td bgcolor="lightgrey" ><b>{escape(table)}</b></td></tr>')
         for col in sorted(column_labels(rows)[table]):
-            print(f"        <tr><td port=\"{col}\">{col}</td></tr>")
+            print(f'        <tr><td port="{escape(col)}">{escape(col)}</td></tr>')
         print("      </table>")
         print("    >]")
     for (pt, ct), pairs in sorted(edges.items()):
         for pc, cc in pairs:
-            print(f"    {pt}:{pc} -> {ct}:{cc}")
+            print(f"    {json.dumps(pt)}:{json.dumps(pc)} -> {json.dumps(ct)}:{json.dumps(cc)}")
     print("}")
 
 

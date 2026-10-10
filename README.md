@@ -124,6 +124,39 @@ Entity/relationship diagram of the categories in `test/data/1amb_updated.cif`, a
 -->
 ![mmcif relationships diagram](rel.svg)
 
+The following diagrams show relationships in the downloaded archive examples,
+including links between extension and base categories.
+
+<details>
+<summary>IHMCIF — PDB-IHM entry 8ZZE</summary>
+
+Source: [8ZZE CIF](https://pdb-ihm.org/cif/8zze.cif).
+
+![IHMCIF relationships in PDB-IHM entry 8ZZE](docs/diagrams/ihm.svg)
+
+</details>
+
+<details>
+<summary>flrCIF — FRET entry 9A08</summary>
+
+Source: [9A08 CIF](https://pdb-ihm.org/cif/9a08.cif).
+
+![flrCIF relationships in FRET entry 9A08](docs/diagrams/flr.svg)
+
+</details>
+
+<details>
+<summary>3DEM — EMDB entry EMD-4404</summary>
+
+Source: [EMD-4404 experimental metadata](https://ftp.ebi.ac.uk/pub/databases/emdb/structures/EMD-4404/metadata/emd-4404.cif.gz).
+This entry's EM categories are included in the current PDBx/mmCIF base dictionary.
+
+![3DEM relationships in EMDB entry EMD-4404](docs/diagrams/3dem.svg)
+
+</details>
+
+See [diagram generation instructions](docs/diagrams/README.md) to regenerate these examples.
+
 ## Multiple data blocks
 
 A file can contain multiple blocks, each beginning with `data_name` and ending
