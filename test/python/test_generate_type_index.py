@@ -38,13 +38,13 @@ save_
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "dictionary.dic"
             source.write_text(text)
-            items, _ = generator.parse_dict(source)
+            items, _, _, _ = generator.parse_dict(source)
         self.assertEqual(
             dict(items),
             {
-                "_atom_site.id": "code",
-                "_atom_site.Cartn_x": "float",
-                "_atom_site.label_seq_id": "int",
+                "_atom_site.id": "VARCHAR",
+                "_atom_site.Cartn_x": "DOUBLE",
+                "_atom_site.label_seq_id": "BIGINT",
             },
         )
 
@@ -57,13 +57,13 @@ save_
             self.assertEqual(gzip.decompress(a.read_bytes()), b"# header\n_entry.id\tVARCHAR\n")
 
     def test_bundled_schema_contains_previously_omitted_valid_items(self):
-        with gzip.open(ROOT / "dict/mmcif_pdbx_v50_type_index.tsv.gz", "rt") as source:
+        with gzip.open(ROOT / "dict/mmcif_type_index.tsv.gz", "rt") as source:
             items = dict(line.rstrip("\n").split("\t") for line in source if not line.startswith("#"))
         self.assertEqual(items["_atom_site.id"], "VARCHAR")
         self.assertEqual(items["_atom_site.Cartn_x"], "DOUBLE")
         self.assertEqual(items["_atom_site.label_seq_id"], "BIGINT")
         self.assertEqual(items["_entry.id"], "VARCHAR")
-        self.assertEqual(len(items), 6801)
+        self.assertGreaterEqual(len(items), 6801)
         self.assertEqual(len(items), len({item.lower() for item in items}))
 
 

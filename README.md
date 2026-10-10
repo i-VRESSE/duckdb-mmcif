@@ -6,7 +6,7 @@
 
 Query [mmCIF](https://mmcif.wwpdb.org/) (PDBx) structural-biology files with SQL, right inside [DuckDB](https://duckdb.org/).
 
-`ATTACH` a `.cif` file and every mmCIF category shows up as a normal DuckDB table — with column types inferred from the PDBx/mmCIF dictionary. No ETL, no schema design, no Python parsing loop: just SQL over macromolecular structure data.
+`ATTACH` a `.cif` file and every mmCIF category shows up as a normal DuckDB table — with column types inferred from the bundled PDBx/mmCIF dictionary and its supported extensions. No ETL, no schema design, no Python parsing loop: just SQL over macromolecular structure data.
 
 ## What is mmCIF?
 
@@ -18,6 +18,7 @@ The format is powerful but awkward to analyze: files are large, syntax is quirky
 
 - **Zero-pipeline analysis** — install as a [community extension](https://duckdb.org/community_extensions/extensions/mmcif) and start querying immediately.
 - **Typed out of the box** — column types come from the mmCIF dictionary type index, so `Cartn_x` is a `DOUBLE` and `label_seq_id` is a `BIGINT`. `.` and `?` become `NULL`.
+- **Dictionary extensions included** — [IHMCIF, flrCIF, 3DEM and ModelCIF](docs/dictionary-extensions.md) support integrative models, fluorescence/FRET, electron microscopy and AlphaFold DB models automatically, with types, documentation links and relationships.
 - **Gzip support** — RCSB-style `*.cif.gz` files (for example `https://files.rcsb.org/download/1AMB.cif.gz`) are auto-detected and decompressed.
 - **Relationships as data** — discover how categories reference each other programmatically with `mmcif_relationships()`, instead of browsing the [mmcif dictionary website](https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Categories/atom_site.html).
 - **Fast** — custom cif parser/writer inspired by the [RCSB mmcif ccp libraries](https://github.com/rcsb/cpp-common), with DuckDB's vectorized execution on top.
@@ -55,12 +56,21 @@ FROM atom_site
 WHERE type_symbol = 'ZN';
 ```
 
-Column types are inferred from the mmCIF dictionary (`dict/mmcif_pdbx_v50_type_index.tsv.gz`):
+Column types are inferred from the combined dictionary (`dict/mmcif_type_index.tsv.gz`):
 
 ```sql
 DESCRIBE atom_site;
 -- Cartn_x DOUBLE, label_seq_id BIGINT, type_symbol VARCHAR, ...
 ```
+
+## Dictionary extensions
+
+The extension bundles the current PDBx/mmCIF v5 dictionary together with
+**IHMCIF**, **flrCIF**, **3DEM** and **ModelCIF**. All are available by default:
+no dictionary selection or downloads are needed when opening a file.
+
+See [dictionary extensions](docs/dictionary-extensions.md) for usage, dictionary
+coverage and ER diagrams from real archive examples.
 
 ## Table functions
 
@@ -93,9 +103,9 @@ Entity/relationship diagram of the categories in `test/data/1amb_updated.cif`, a
 
 <!-- Generated with:
     python3 scripts/mmcif_relationships_diagram.py test/data/1amb_updated.cif -f dot \
-      | dot -Tsvg -o rel.svg
+      | dot -Tsvg -o docs/diagrams/pdbx.svg
 -->
-![mmcif relationships diagram](rel.svg)
+![mmcif relationships diagram](docs/diagrams/pdbx.svg)
 
 ## Multiple files
 

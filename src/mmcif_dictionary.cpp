@@ -50,6 +50,8 @@ DictionaryIndex::DictionaryIndex() {
 	});
 	MmcifForEachTsvRow(MMCIFF_RELATIONSHIPS_GZ, MMCIFF_RELATIONSHIPS_GZ_SIZE,
 	                   [&](string parent, string child) { relationships.emplace_back(parent, child); });
+	MmcifForEachTsvRow(MMCIFF_DOCUMENTATION_GZ, MMCIFF_DOCUMENTATION_GZ_SIZE,
+	                   [&](string key, string url) { documentation[key] = std::move(url); });
 }
 
 // "_category.item" -> DuckDB type; unknown -> VARCHAR
@@ -63,15 +65,22 @@ LogicalType DictionaryIndex::LookupType(const string &category, const string &co
 }
 
 string DictionaryIndex::GetCategoryUrl(const string &category) const {
+	auto entry = documentation.find(category);
+	if (entry != documentation.end()) {
+		return entry->second + "/Categories/" + entry->first + ".html";
+	}
 	return "https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Categories/" + category + ".html";
 }
 
 string DictionaryIndex::GetItemUrl(const string &category, const string &column) const {
 	auto key = "_" + category + "." + column;
-	auto entry = types.find(key);
-	// Prefer the dictionary's canonical spelling; custom items use the file spelling.
-	auto &item = entry != types.end() ? entry->first : key;
-	return "https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/" + item + ".html";
+	auto entry = documentation.find(key);
+	// Prefer the defining dictionary's canonical spelling when available.
+	// Unknown items retain the existing base-dictionary URL fallback.
+	if (entry != documentation.end()) {
+		return entry->second + "/Items/" + entry->first + ".html";
+	}
+	return "https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/" + key + ".html";
 }
 
 const vector<string> *DictionaryIndex::GetColumns(const string &category) const {

@@ -68,7 +68,7 @@ atom_site	B_iso_or_equiv	15	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.
 atom_site	Cartn_x	11	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.Cartn_x.html	DOUBLE
 atom_site	Cartn_y	12	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_atom_site.Cartn_y.html	DOUBLE
 
-# Items missing from the local type index still receive their dictionary URL.
+# Items defined with looped _item.name fields receive their dictionary URL.
 query T
 SELECT comment FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/1amb_updated.cif') WHERE table_name='atom_site' AND column_name='id';
 ----
