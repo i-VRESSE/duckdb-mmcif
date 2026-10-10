@@ -24,7 +24,7 @@ SELECT id, Cartn_x, type_symbol FROM mmcif_scan('__WORKING_DIRECTORY__/test/data
 4	NULL	N
 
 query TI rowsort
-SELECT regexp_extract(filename, '[^/]+$'), count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'atom_site') GROUP BY filename;
+SELECT parse_filename(filename), count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'atom_site') GROUP BY filename;
 ----
 a.cif	2
 b.cif	2
@@ -36,7 +36,7 @@ SELECT count(label_seq_id) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/mult
 
 # Single-tag values, skipped files and file-local projection remapping.
 query TT
-SELECT title, regexp_extract(filename, '[^/]+$') FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/a.cif', '__WORKING_DIRECTORY__/test/data/multifile/c.cif'], 'struct');
+SELECT title, parse_filename(filename) FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/a.cif', '__WORKING_DIRECTORY__/test/data/multifile/c.cif'], 'struct');
 ----
 Only in c	c.cif
 

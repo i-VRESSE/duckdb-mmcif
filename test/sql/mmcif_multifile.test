@@ -66,13 +66,13 @@ NULL
 O
 
 query TI rowsort
-SELECT regexp_extract(filename, '[^/]+$'), count(*) FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/[ab].cif', '__WORKING_DIRECTORY__/test/data/multifile/c*.cif'], 'atom_site', column_source := 'files') GROUP BY filename;
+SELECT parse_filename(filename), count(*) FROM mmcif_scan(['__WORKING_DIRECTORY__/test/data/multifile/[ab].cif', '__WORKING_DIRECTORY__/test/data/multifile/c*.cif'], 'atom_site', column_source := 'files') GROUP BY filename;
 ----
 a.cif	2
 b.cif	2
 
 query TT
-SELECT title, regexp_extract(filename, '[^/]+$') FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'struct', column_source := 'files');
+SELECT title, parse_filename(filename) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/multifile/*.cif', 'struct', column_source := 'files');
 ----
 Only in c	c.cif
 
@@ -173,7 +173,7 @@ WITH entries AS (
     FROM mmcif_scan(getvariable('cif_files'), 'pdbx_database_status', column_source := 'files')
     GROUP BY filename
 )
-SELECT regexp_extract(e.filename, '[^/]+$'), e.id, r.resolution, d.deposit_date
+SELECT parse_filename(e.filename), e.id, r.resolution, d.deposit_date
 FROM entries e
 LEFT JOIN resolutions r USING (filename)
 LEFT JOIN deposits d USING (filename)
