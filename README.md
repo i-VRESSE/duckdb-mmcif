@@ -120,9 +120,9 @@ Entity/relationship diagram of the categories in `test/data/1amb_updated.cif`, a
 
 <!-- Generated with:
     python3 scripts/mmcif_relationships_diagram.py test/data/1amb_updated.cif -f dot \
-      | dot -Tsvg -o rel.svg
+      | dot -Tsvg -o docs/diagrams/rel.svg
 -->
-![mmcif relationships diagram](rel.svg)
+![mmcif relationships diagram](docs/diagrams/rel.svg)
 
 The following diagrams show relationships in the downloaded archive examples,
 including links between extension and base categories.
