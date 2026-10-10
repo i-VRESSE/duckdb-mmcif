@@ -1,8 +1,8 @@
 # Dictionary extensions
 
 The extension bundles the current PDBx/mmCIF v5 dictionary together with
-**IHMCIF**, **flrCIF** and **3DEM**. All are available by default: no dictionary
-selection or downloads are needed when opening a file.
+**IHMCIF**, **flrCIF**, **3DEM** and **ModelCIF**. All are available by default:
+no dictionary selection or downloads are needed when opening a file.
 
 ```sql
 ATTACH 'integrative_model.cif' AS model (TYPE mmcif);
@@ -78,3 +78,28 @@ This entry's EM categories are already in the current PDBx/mmCIF base dictionary
 The diagram includes only those also listed in the standalone 3DEM dictionary.
 
 ![3DEM relationships in EMDB entry EMD-4404](diagrams/3dem.svg)
+
+## ModelCIF
+
+ModelCIF describes computationally predicted structural models, including the
+models distributed by AlphaFold DB. Its `ma_*` categories cover model metadata,
+templates, protocols and quality metrics such as global and per-residue pLDDT.
+It extends PDBx/mmCIF; all four extension dictionaries are available together.
+
+Bundled version: **1.4.9**. [Dictionary documentation](https://mmcif.wwpdb.org/dictionaries/mmcif_ma.dic/Index/).
+
+Example: [AlphaFold DB model AF-A0A009IHW8-F1](https://alphafold.ebi.ac.uk/entry/AF-A0A009IHW8-F1),
+from the [EMBL-EBI Swiss-Prot v6 CIF archive](https://ftp.ebi.ac.uk/pub/databases/alphafold/v6/swissprot_cif_v6.tar).
+The unmodified gzip is included as a [test fixture](../test/data/AF-A0A009IHW8-F1.README.md).
+The diagram selects only `ma_*` categories, excluding base definitions repeated
+in the ModelCIF dictionary.
+
+```sql
+ATTACH 'AF-A0A009IHW8-F1-model_v6.cif.gz' AS prediction (TYPE mmcif);
+SELECT m.name, q.metric_value
+FROM prediction.ma_qa_metric_global q
+JOIN prediction.ma_qa_metric m ON q.metric_id = m.id;
+-- pLDDT, 84.99
+```
+
+![ModelCIF relationships in AlphaFold DB model AF-A0A009IHW8-F1](diagrams/ma.svg)

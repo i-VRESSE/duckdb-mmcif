@@ -18,7 +18,7 @@ The format is powerful but awkward to analyze: files are large, syntax is quirky
 
 - **Zero-pipeline analysis** — install as a [community extension](https://duckdb.org/community_extensions/extensions/mmcif) and start querying immediately.
 - **Typed out of the box** — column types come from the mmCIF dictionary type index, so `Cartn_x` is a `DOUBLE` and `label_seq_id` is a `BIGINT`. `.` and `?` become `NULL`.
-- **Dictionary extensions included** — [IHMCIF, flrCIF and 3DEM](docs/dictionary-extensions.md) support integrative models, fluorescence/FRET and electron microscopy data automatically, with types, documentation links and relationships.
+- **Dictionary extensions included** — [IHMCIF, flrCIF, 3DEM and ModelCIF](docs/dictionary-extensions.md) support integrative models, fluorescence/FRET, electron microscopy and AlphaFold DB models automatically, with types, documentation links and relationships.
 - **Gzip support** — RCSB-style `*.cif.gz` files (for example `https://files.rcsb.org/download/1AMB.cif.gz`) are auto-detected and decompressed.
 - **Relationships as data** — discover how categories reference each other programmatically with `mmcif_relationships()`, instead of browsing the [mmcif dictionary website](https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Categories/atom_site.html).
 - **Fast** — custom cif parser/writer inspired by the [RCSB mmcif ccp libraries](https://github.com/rcsb/cpp-common), with DuckDB's vectorized execution on top.
@@ -66,8 +66,8 @@ DESCRIBE atom_site;
 ## Dictionary extensions
 
 The extension bundles the current PDBx/mmCIF v5 dictionary together with
-**IHMCIF**, **flrCIF** and **3DEM**. All are available by default: no dictionary
-selection or downloads are needed when opening a file.
+**IHMCIF**, **flrCIF**, **3DEM** and **ModelCIF**. All are available by default:
+no dictionary selection or downloads are needed when opening a file.
 
 See [dictionary extensions](docs/dictionary-extensions.md) for usage, dictionary
 coverage and ER diagrams from real archive examples.

@@ -4,10 +4,12 @@ See [dictionary extensions](../dictionary-extensions.md) for dictionary explanat
 and the rendered extension diagrams.
 
 The SVGs show the relationships returned by `mmcif_relationships()` for real
-archive examples: IHMCIF (8ZZE), flrCIF (9A08) and EMDB/3DEM (EMD-4404).
+archive examples: IHMCIF (8ZZE), flrCIF (9A08), EMDB/3DEM (EMD-4404) and
+ModelCIF (AF-A0A009IHW8-F1).
 Each extension SVG is restricted to categories listed in its source dictionary
 and present in the example file. The flrCIF SVG additionally selects `flr_*`
-categories, excluding the IHM definitions repeated in that dictionary. Edges
+categories, excluding the IHM definitions repeated in that dictionary. The
+ModelCIF SVG selects `ma_*` categories, excluding repeated base definitions. Edges
 connect parent and child columns only when both categories are selected.
 Categories without an internal relationship are shown as isolated nodes.
 The PDBx/mmCIF diagram retains its original categories and presentation.
@@ -33,6 +35,8 @@ curl --fail --location https://mmcif.wwpdb.org/dictionaries/ascii/mmcif_ihm_flr_
     --output .scratch/dictionaries/mmcif_ihm_flr_ext.dic
 curl --fail --location https://mmcif.wwpdb.org/dictionaries/ascii/mmcif_em.dic \
     --output .scratch/dictionaries/mmcif_em.dic
+curl --fail --location https://mmcif.wwpdb.org/dictionaries/ascii/mmcif_ma.dic \
+    --output .scratch/dictionaries/mmcif_ma.dic
 
 python3 scripts/mmcif_relationships_diagram.py \
     .scratch/real-dictionaries/8zze.cif -f dot \
@@ -47,6 +51,11 @@ python3 scripts/mmcif_relationships_diagram.py \
     test/data/emd-4404.cif.gz -f dot \
     --dictionary .scratch/dictionaries/mmcif_em.dic \
     | dot -Tsvg -o docs/diagrams/3dem.svg
+python3 scripts/mmcif_relationships_diagram.py \
+    test/data/AF-A0A009IHW8-F1-model_v6.cif.gz -f dot \
+    --dictionary .scratch/dictionaries/mmcif_ma.dic \
+    --category-prefix ma_ \
+    | dot -Tsvg -o docs/diagrams/ma.svg
 ```
 
 Source dictionary versions and checksums used for these diagrams match

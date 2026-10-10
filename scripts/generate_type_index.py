@@ -191,7 +191,7 @@ def write_gz(path, header, rows):
 def generate(directory, output_dir, manifest_path):
     manifest = json.loads(Path(manifest_path).read_text())
     sources = []
-    provenance = "# Combined PDBx/mmCIF v5 + IHMCIF + flrCIF + 3DEM\n"
+    provenance = "# Combined PDBx/mmCIF v5 + IHMCIF + flrCIF + 3DEM + ModelCIF\n"
     for source in manifest["sources"]:
         path = Path(directory) / source["filename"]
         if hashlib.sha256(path.read_bytes()).hexdigest() != source["sha256"]:
