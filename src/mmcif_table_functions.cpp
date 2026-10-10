@@ -680,8 +680,10 @@ static void MmcifRegisterDescribed(ExtensionLoader &loader, TableFunction functi
 	}
 	if (function.name == "mmcif_scan") {
 		parameter_names.push_back("column_source");
-		description += " Bind bundled dictionary columns and open files lazily by default. Use column_source := "
-		               "'files' for custom items and file-based column discovery.";
+		description += " Use column_source := 'dictionary' (default) for all bundled category columns and lazy "
+		               "parallel readers capped by threads. Missing items are typed NULLs and absent known categories "
+		               "yield no rows. Unknown categories or items in the requested category error; use column_source "
+		               ":= 'files' to discover the column union from input files and include custom items.";
 	}
 	FunctionDescription desc;
 	desc.parameter_names = std::move(parameter_names);
@@ -706,12 +708,15 @@ void MmcifRegisterTableFunctions(ExtensionLoader &loader) {
 	                       "List data block names in file order, without the data_ prefix.",
 	                       {"SELECT * FROM mmcif_blocks('structures.cif');"});
 
-	// mmcif_scan(file, table): scan one category of an mmCIF file as a table.
+	// mmcif_scan(files, category): scan one category across files as a table.
 	MmcifRegisterDescribed(
-	    loader, MmcifScanFunction(), {"file", "table"},
-	    "Scan one mmCIF category from paths or globs, unioning columns by name with filename for multiple files.",
-	    {"SELECT * FROM mmcif_scan('https://files.rcsb.org/download/1AMB.cif.gz', 'atom_site'); "
-	     "-- 438 rows"});
+	    loader, MmcifScanFunction(), {"files", "category"},
+	    "Scan one mmCIF category from a file path, glob, or list of paths/globs. Plain CIF and gzip inputs are "
+	    "supported. Multiple matched files add a filename column containing the concrete source path.",
+	    {"SELECT * FROM mmcif_scan('https://files.rcsb.org/download/1AMB.cif.gz', 'atom_site');",
+	     "SELECT count(*) FROM mmcif_scan('structures/**/*.cif.gz', 'atom_site');",
+	     "SELECT filename, id FROM mmcif_scan(['first.cif', 'more/*.cif.gz'], 'entry');",
+	     "SELECT * FROM mmcif_scan('structures/*.cif', 'custom', column_source := 'files');"});
 
 	// mmcif_tables(file): one row per category with its dictionary page and column count.
 	TableFunction mmcif_tables("mmcif_tables", {LogicalType::VARCHAR}, MmcifMetaScan, MmcifTablesBind,
@@ -729,8 +734,7 @@ void MmcifRegisterTableFunctions(ExtensionLoader &loader) {
 	MmcifRegisterDescribed(loader, std::move(mmcif_columns), {"file"},
 	                       "List the categories and columns in an mmCIF file, with their dictionary documentation "
 	                       "links and inferred types.",
-	                       {"SELECT * FROM mmcif_columns('https://files.rcsb.org/download/1AMB.cif.gz'); "
-	                        "-- 342 rows"});
+	                       {"SELECT * FROM mmcif_columns('https://files.rcsb.org/download/1AMB.cif.gz');"});
 
 	// mmcif_relationships(file): parent/child (table, column) key pairs.
 	TableFunction mmcif_relationships("mmcif_relationships", {LogicalType::VARCHAR}, MmcifMetaScan,
@@ -739,8 +743,7 @@ void MmcifRegisterTableFunctions(ExtensionLoader &loader) {
 	MmcifRegisterDescribed(loader, std::move(mmcif_relationships), {"file"},
 	                       "List the parent/child key relationships between the categories in an mmCIF file, each side "
 	                       "as a (table, column) pair.",
-	                       {"SELECT * FROM mmcif_relationships('https://files.rcsb.org/download/1AMB.cif.gz'); "
-	                        "-- 86 rows"});
+	                       {"SELECT * FROM mmcif_relationships('https://files.rcsb.org/download/1AMB.cif.gz');"});
 }
 
 } // namespace duckdb
