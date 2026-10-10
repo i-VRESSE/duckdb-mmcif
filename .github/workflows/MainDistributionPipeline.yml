@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: python3 -m unittest discover -s test/python -p test_dictionary_generation.py
+      - run: python3 -m unittest discover -s test/python
 
   duckdb-stable-build:
     name: Build extension binaries (stable)

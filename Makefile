@@ -19,4 +19,4 @@ test_cpp: release
 
 # Offline generator checks; no downloaded dictionaries or DuckDB build needed.
 test_dictionary:
-	python3 -m unittest discover -s test/python -p test_dictionary_generation.py
+	python3 -m unittest discover -s test/python

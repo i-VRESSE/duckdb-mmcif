@@ -22,6 +22,7 @@
 #include <utility>
 
 #include "mmcif_dictionary.hpp"
+#include "mmcif_category_metadata.hpp"
 
 namespace duckdb {
 
@@ -319,7 +320,7 @@ static unique_ptr<FunctionData> MmcifBlocksBind(ClientContext &context, TableFun
 	return std::move(result);
 }
 
-// mmcif_tables(file): table_name, comment, column_count
+// mmcif_tables(file): present categories with offline dictionary metadata
 static unique_ptr<FunctionData> MmcifTablesBind(ClientContext &context, TableFunctionBindInput &input,
                                                 vector<LogicalType> &return_types, vector<string> &names) {
 	auto file_name = input.inputs[0].GetValue<string>();
@@ -327,11 +328,14 @@ static unique_ptr<FunctionData> MmcifTablesBind(ClientContext &context, TableFun
 	auto index = MmcifIndex::Load(file_name, &context, MmcifDataBlock(input).get());
 	auto &dictionary = DictionaryIndex::Get();
 	for (auto &cat : index->GetCategories()) {
+		auto &metadata = MmcifCategoryMetadataIndex::Get().Lookup(cat->name);
 		result->rows.push_back({Value(cat->name), Value(dictionary.GetCategoryUrl(cat->name)),
-		                        Value::BIGINT(NumericCast<int64_t>(cat->columns.size()))});
+		                        Value::BIGINT(NumericCast<int64_t>(cat->columns.size())), metadata.is_single_row,
+		                        metadata.description, metadata.category_groups, metadata.is_mandatory});
 	}
-	names = {"table_name", "comment", "column_count"};
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT};
+	names = {"table_name", "comment", "column_count", "is_single_row", "description", "category_groups", "is_mandatory"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BOOLEAN,
+	                LogicalType::VARCHAR, LogicalType::LIST(LogicalType::VARCHAR), LogicalType::BOOLEAN};
 	return std::move(result);
 }
 
@@ -429,7 +433,8 @@ void MmcifRegisterTableFunctions(ExtensionLoader &loader) {
 	mmcif_tables.projection_pushdown = true;
 	MmcifRegisterDescribed(loader, std::move(mmcif_tables), {"file"},
 	                       "List the categories in an mmCIF file with their dictionary documentation links and "
-	                       "column counts.",
+	                       "column counts, single-row constraints, descriptions, category groups and mandatory flags. "
+	                       "Dictionary metadata is independent of observed rows; unavailable metadata is NULL.",
 	                       {"SELECT * FROM mmcif_tables('https://files.rcsb.org/download/1AMB.cif.gz');"});
 
 	// mmcif_columns(file): one row per (category, column) with its inferred type.

@@ -54,7 +54,7 @@ curl -o test/data/1amb_updated.cif https://www.ebi.ac.uk/pdbe/entry-files/downlo
 
 - `src/` — extension sources
 - `modules/` — vendored RCSB `cpp-cif-parser` / `cpp-cif-file` core libraries
-- `dict/` — mmCIF dictionary type index used for column type inference
+- `dict/` — bundled dictionary types, relationships, documentation and category metadata
 - `test/sql/`, `test/data/` — SQLLogic tests and fixtures
 - `test/cpp/` — C++ Catch unit tests (run with `make test_cpp`)
 - `scripts/` — helper scripts (e.g. `mmcif_relationships_diagram.py`, which regenerates `rel.svg`)
@@ -94,7 +94,7 @@ SHA-256 checksums; the generator uses only Python's standard library.
    Downloads from wwPDB can change; checksum mismatches intentionally stop
    generation until the new source has been reviewed.
 
-3. Generate all three artifacts:
+3. Generate all four artifacts:
 
    ```sh
    python3 scripts/generate_type_index.py .scratch/dictionaries
@@ -102,7 +102,10 @@ SHA-256 checksums; the generator uses only Python's standard library.
 
    Saveframes, scalar fields and loop fields are parsed, including both
    `_item_linked` and `_pdbx_item_linked_group_list` relationships. Duplicate
-   items and links are merged case-insensitively. Documentation ownership
+   items and links are merged case-insensitively. Category metadata includes
+   descriptions, groups, mandatory codes and row limits derived from complete
+   category keys and their dictionary links. Category ownership follows the
+   same source priority as documentation. Documentation ownership
    follows the manifest order: base, IHMCIF, flrCIF, 3DEM. This keeps base URLs
    for shared definitions while linking extension-only items to their source.
 
@@ -113,7 +116,7 @@ SHA-256 checksums; the generator uses only Python's standard library.
    and stale resolutions fail rather than silently changing behavior.
 
 4. Run `make test_dictionary`, `make test` and `make test_cpp`, then commit the
-   manifest and all three artifacts together. Generated gzip files omit
+   manifest and all four artifacts together. Generated gzip files omit
    timestamps and local paths so regeneration is reproducible.
 
 ## AI Declaration
