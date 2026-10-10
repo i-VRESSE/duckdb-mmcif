@@ -56,7 +56,7 @@ Ranked by expected impact:
   dictionary mode; no dictionary row constraint is used to discard input rows.
 - Test LIMIT without touching a later invalid file, EXPLAIN without reading
   contents, missing categories/columns, schema errors and retained string chunks.
-- SQL tests pass (591 assertions), C++ tests pass (181 assertions), and three
+- SQL tests pass (591 assertions), C++ tests pass (212 assertions), and three
   offline dictionary-generator tests pass. Repository formatting checks pass.
 
 Use the opt-in argument:
@@ -113,3 +113,62 @@ multiple category scans reread files independently. Query operators or retained
 results can consume additional DuckDB memory. This benchmark measures an
 aggregate, not collecting every atom row in a client. Improvements 2–7 remain
 follow-up work.
+
+
+### Scan progress feedback
+
+`mmcif_scan` and attached readers register DuckDB's `table_scan_progress`
+callback. An atomic completed-file counter supports concurrent polling without
+accessing mutable reader state, reading ahead, or counting rows. Dictionary
+mode includes inputs with missing categories and empty loops; file-discovery
+mode counts the category readers retained after binding. A single-file reader
+reports completion after its scan ends. Files receive equal weight.
+A file-count row estimate gives large collection scans appropriate weight in
+DuckDB's query progress instead of the default estimate of one row for the
+entire collection. This is an estimate, not a maximum row count, and requires
+no file reads.
+
+Enable terminal feedback with `SET enable_progress_bar = true` and
+`SET progress_bar_time = 1000`. Binding still has no progress feedback.
+Regression tests exercise initial, partial-file, skipped-file and completed
+states across dictionary, file-discovery and attached readers.
+
+The terminal bar was tested in a pseudo-terminal against all 6,397 files with
+`count(*)`, with progress enabled and a 1,000 ms display threshold. In both
+single-scan thread configurations it first appeared after approximately 1.5 s,
+advanced through 1–99%, and cleared when the result was printed. DuckDB's shell
+clears the completed bar rather than leaving a literal 100% frame on screen.
+The callback's 100% completion state is covered by the C++ regression tests.
+
+### Counting with six CPU cores
+
+On the same Ryzen 5 5600G host with six available cores, two fresh processes
+per case, warm filesystem caches, dictionary column mode and terminal progress
+enabled:
+
+| Query arrangement | DuckDB threads | Median wall time | Peak RSS |
+| --- | --- | --- | --- |
+| One `mmcif_scan` over the full glob | 1 | 51.28 s | 96.4 MiB |
+| One `mmcif_scan` over the full glob | 6 | 51.15 s | 96.6 MiB |
+| Six disjoint scans, `UNION ALL` their counts and sum | 6 | 9.29 s | 276.3 MiB |
+
+Every run returns exactly 49,203,033 atoms across all 6,397 inputs. Single scans
+consume about one core because `MmcifGlobalState::MaxThreads()` is still 1.
+Six independent scan pipelines consume about 5.7 cores on average and give a
+5.5-fold speedup, at the cost of several active file buffers.
+For the six-scan benchmark, files were sorted by decompressed size and assigned
+to the currently smallest batch, yielding approximately 971 MB and 1,066–1,067
+files per batch. Execution still uses the existing sequential reader in each
+branch; internal parallel reading from one function remains improvement 6.
+
+[docs/examples/count_parallel.sql](docs/examples/count_parallel.sql) provides a
+runnable six-scan query using interleaved path lists instead of a size-based
+partition. Its input glob should match at least six files. Progress is visible
+for these concurrent scans too; equal file weights make percentages and ETA
+approximate, particularly when larger files are processed first.
+
+The interleaved example was also run directly against the real 6,397-file glob:
+10.21 s process wall time, 177.2 MiB peak RSS, and the same 49,203,033 atoms
+(one fresh-process run). A smaller fixture run returned the expected 24 atoms.
+In the CLI's standard non-TTY display this run printed a final 100% bar;
+the interactive shell display clears its final bar instead.

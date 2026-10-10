@@ -14,6 +14,7 @@
 #include "mmcif_file.hpp"
 #include "mmcif_index.hpp"
 #include "mmcif_patch.hpp"
+#include "mmcif_table_functions.hpp"
 #include "mmcif_write_store.hpp"
 
 #include <cstring>
@@ -792,4 +793,58 @@ TEST_CASE("MmcifIndex supports unnamed blocks and rejects ambiguous selection", 
 	TempCif duplicate("mmcif_duplicate_blocks.cif", "data_a\n_a.v one\ndata_A\n_a.v two\n");
 	REQUIRE(MmcifIndex::Load(duplicate.Str(), nullptr)->GetDataBlockNames().size() == 2);
 	REQUIRE_THROWS_WITH(LoadBlock(duplicate, "a"), Catch::Contains("ambiguous"));
+}
+
+TEST_CASE("mmcif scan progress counts completed files without reading ahead", "[mmcif][progress]") {
+	TempCif missing("progress_missing.cif", "data_missing\n_entry.id missing\n");
+	std::string content = "data_large\nloop_\n_atom_site.id\n";
+	for (idx_t row = 0; row <= STANDARD_VECTOR_SIZE; row++) {
+		content += std::to_string(row) + "\n";
+	}
+	TempCif large("progress_large.cif", content);
+	TempCif empty("progress_empty.cif", "data_empty\nloop_\n_atom_site.id\n");
+	TempCif single("progress_single.cif", "data_single\n_atom_site.id last\n");
+	vector<string> paths {missing.Str(), large.Str(), empty.Str(), single.Str()};
+	DuckDB database(nullptr);
+	Connection connection(database);
+	auto &context = *connection.context;
+	auto function = MmcifScanFunction();
+	REQUIRE(function.table_scan_progress);
+	MmcifBindData bind;
+	vector<double> expected;
+	vector<idx_t> counts {STANDARD_VECTOR_SIZE, 1, 1, 0};
+	SECTION("dictionary mode includes missing categories and empty loops") {
+		bind.dictionary_schema = true;
+		bind.paths = paths;
+		bind.table_name = "atom_site";
+		bind.column_names = {"id"};
+		bind.column_types = {LogicalType::VARCHAR};
+		expected = {25.0, 25.0, 75.0, 100.0};
+	}
+	SECTION("file-discovered mode counts its category readers") {
+		vector<shared_ptr<MmcifIndex>> indexes;
+		for (auto &path : paths) {
+			indexes.push_back(MmcifIndex::Load(path, nullptr));
+		}
+		MmcifBindFiles(bind, paths, indexes, "atom_site");
+		expected = {0.0, 0.0, 200.0 / 3.0, 100.0};
+	}
+	SECTION("single-file attached reader") {
+		MmcifBindIndex(bind, MmcifIndex::Load(large.Str(), nullptr), "atom_site");
+		expected = {0.0, 0.0, 100.0};
+		counts = {STANDARD_VECTOR_SIZE, 1, 0};
+	}
+	REQUIRE(function.table_scan_progress(context, &bind, nullptr) == 0.0);
+	TableFunctionInitInput init(&bind, vector<column_t> {0}, {}, nullptr);
+	auto state = function.init_global(context, init);
+	REQUIRE(function.table_scan_progress(context, &bind, state.get()) == 0.0);
+	TableFunctionInput input(&bind, nullptr, state.get());
+	DataChunk output;
+	output.Initialize(context, {LogicalType::VARCHAR});
+	for (idx_t step = 0; step < counts.size(); step++) {
+		output.Reset();
+		function.function(context, input, output);
+		REQUIRE(output.size() == counts[step]);
+		REQUIRE(function.table_scan_progress(context, &bind, state.get()) == Approx(expected[step]));
+	}
 }

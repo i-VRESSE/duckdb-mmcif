@@ -18,7 +18,9 @@
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
+#include "duckdb/storage/statistics/node_statistics.hpp"
 
+#include <atomic>
 #include <utility>
 
 #include "mmcif_dictionary.hpp"
@@ -89,6 +91,11 @@ struct MmcifGlobalState : public GlobalTableFunctionState {
 	}
 
 	bool NextDictionaryFile(ClientContext &context) {
+		// Publish completed files before opening the next one. Progress is polled
+		// from another thread, which must not inspect the mutable reader state.
+		if (category) {
+			completed_files.store(file_position + 1);
+		}
 		// The output owns projected VARCHAR cells, so the previous arena can die.
 		cursor.reset();
 		category = nullptr;
@@ -100,6 +107,7 @@ struct MmcifGlobalState : public GlobalTableFunctionState {
 			    MmcifIndex::Load(bind.paths[file_position], &context, bind.has_data_block ? &bind.data_block : nullptr);
 			auto cat = loaded->FindCategory(bind.table_name);
 			if (!cat || cat->columns.empty()) {
+				completed_files.store(file_position + 1);
 				continue;
 			}
 			vector<idx_t> mapping;
@@ -118,6 +126,7 @@ struct MmcifGlobalState : public GlobalTableFunctionState {
 		return false;
 	}
 
+	std::atomic<idx_t> completed_files {0};
 	idx_t next_path = 0;
 	case_insensitive_map_t<idx_t> dictionary_columns;
 
@@ -430,6 +439,7 @@ static void MmcifScan(ClientContext &context, TableFunctionInput &data, DataChun
 				break;
 			}
 		} else {
+			gstate.completed_files.store(gstate.file_position + 1);
 			if (gstate.bind.files.empty() || gstate.file_position + 1 == gstate.bind.files.size()) {
 				break;
 			}
@@ -454,10 +464,34 @@ static void MmcifScan(ClientContext &context, TableFunctionInput &data, DataChun
 	output.SetCardinality(count);
 }
 
+// File-based progress avoids an extra row-count pass and any read-ahead.
+// Immutable bind data and the atomic counter are safe for concurrent polling.
+static double MmcifScanProgress(ClientContext &context, const FunctionData *bind_data,
+                                const GlobalTableFunctionState *global_state) {
+	if (!global_state) {
+		return 0.0;
+	}
+	auto &bind = bind_data->Cast<MmcifBindData>();
+	auto &state = global_state->Cast<MmcifGlobalState>();
+	auto total = bind.dictionary_schema ? bind.paths.size() : (bind.files.empty() ? idx_t(1) : bind.files.size());
+	return total ? 100.0 * static_cast<double>(state.completed_files.load()) / static_cast<double>(total) : 100.0;
+}
+
+// Estimate one row per input file rather than the default one row for the
+// whole collection. This also gives the scan appropriate weight in DuckDB's
+// pipeline progress. It is an estimate, never a row bound or a discovery pass.
+static unique_ptr<NodeStatistics> MmcifScanCardinality(ClientContext &context, const FunctionData *bind_data) {
+	auto &bind = bind_data->Cast<MmcifBindData>();
+	auto files = bind.dictionary_schema ? bind.paths.size() : (bind.files.empty() ? idx_t(1) : bind.files.size());
+	return make_uniq<NodeStatistics>(files);
+}
+
 TableFunction MmcifScanFunction() {
 	TableFunction result("mmcif_scan", {LogicalType::VARCHAR, LogicalType::VARCHAR}, MmcifScan, MmcifBind,
 	                     MmcifInitGlobal);
 	result.projection_pushdown = true;
+	result.table_scan_progress = MmcifScanProgress;
+	result.cardinality = MmcifScanCardinality;
 	result.named_parameters["column_source"] = LogicalType::VARCHAR;
 	return result;
 }

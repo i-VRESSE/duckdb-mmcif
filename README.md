@@ -140,6 +140,22 @@ file is read. Glob expansion still happens before execution, and each active
 file is fully decompressed and indexed, so memory depends on its size. Multiple
 category scans each read their input independently.
 
+Enable DuckDB's terminal progress bar for long scans:
+
+```sql
+SET enable_progress_bar = true;
+SET progress_bar_time = 1000;
+```
+
+Scans report completed files, including files without the requested category in
+dictionary mode. Files have equal weight, so large files can make the bar pause.
+The callback reports execution progress; glob expansion and default file-based
+column discovery happen during binding and have no progress feedback.
+
+Each scan currently reads files sequentially, even with more DuckDB threads.
+Independent scans can run concurrently: [count_parallel.sql](docs/examples/count_parallel.sql)
+splits a collection across six scans and sums their atom counts.
+
 `ATTACH` requires one exact file path. Multi-file access is provided by
 `mmcif_scan`; the metadata functions (`mmcif_tables`, `mmcif_columns`,
 `mmcif_relationships`, and `mmcif_blocks`) take one file.
