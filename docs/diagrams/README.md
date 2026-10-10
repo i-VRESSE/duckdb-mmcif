@@ -34,11 +34,11 @@ python3 scripts/mmcif_relationships_diagram.py \
 The EMDB file is the unmodified archive fixture checked into `test/data`;
 its download URL and checksum are recorded in
 [the fixture documentation](../../test/data/emd-4404.README.md).
-The existing PDBx/mmCIF diagram, `rel.svg`, is stored here alongside the
+The existing PDBx/mmCIF diagram, `pdbx.svg`, is stored here alongside the
 extension diagrams and remains expanded in the main README. To regenerate it:
 
 ```sh
 python3 scripts/mmcif_relationships_diagram.py \
     test/data/1amb_updated.cif -f dot \
-    | dot -Tsvg -o docs/diagrams/rel.svg
+    | dot -Tsvg -o docs/diagrams/pdbx.svg
 ```

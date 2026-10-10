@@ -10,7 +10,7 @@ Usage:
 
 Examples:
     python3 scripts/mmcif_relationships_diagram.py test/data/1amb_updated.cif
-    python3 scripts/mmcif_relationships_diagram.py test/data/1amb_updated.cif -f dot | dot -Tsvg -o docs/diagrams/rel.svg
+    python3 scripts/mmcif_relationships_diagram.py test/data/1amb_updated.cif -f dot | dot -Tsvg -o docs/diagrams/pdbx.svg
 """
 
 import argparse

@@ -57,7 +57,7 @@ curl -o test/data/1amb_updated.cif https://www.ebi.ac.uk/pdbe/entry-files/downlo
 - `dict/` — mmCIF dictionary type index used for column type inference
 - `test/sql/`, `test/data/` — SQLLogic tests and fixtures
 - `test/cpp/` — C++ Catch unit tests (run with `make test_cpp`)
-- `scripts/` — helper scripts (e.g. `mmcif_relationships_diagram.py`, which regenerates `docs/diagrams/rel.svg`)
+- `scripts/` — helper scripts (e.g. `mmcif_relationships_diagram.py`, which regenerates `docs/diagrams/pdbx.svg`)
 - `docs/examples/` — ready-to-run example scripts
 - `duckdb/`, `extension-ci-tools/` — git submodules
 
