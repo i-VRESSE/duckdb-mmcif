@@ -124,8 +124,10 @@ Entity/relationship diagram of the categories in `test/data/1amb_updated.cif`, a
 -->
 ![mmcif relationships diagram](docs/diagrams/pdbx.svg)
 
-The following diagrams show relationships in the downloaded archive examples,
-including links between extension and base categories.
+The following diagrams show only categories defined by each extension and
+present in the downloaded archive example, with relationships between those
+categories. The flrCIF diagram focuses on `flr_*` categories and excludes
+inherited IHMCIF categories.
 
 <details>
 <summary>IHMCIF — PDB-IHM entry 8ZZE</summary>
