@@ -33,6 +33,12 @@ struct MmcifScanFile {
 struct MmcifBindData : public FunctionData {
 	// Multi-file/global read path: file-local columns map to the union schema.
 	vector<MmcifScanFile> files;
+	// Dictionary mode binds only paths and a fixed schema, never file contents.
+	bool dictionary_schema = false;
+	vector<string> paths;
+	string table_name;
+	bool has_data_block = false;
+	string data_block;
 	idx_t filename_column = DConstants::INVALID_INDEX;
 	std::vector<string> column_names;
 	std::vector<LogicalType> column_types;

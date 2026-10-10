@@ -27,7 +27,7 @@ static void MmcifForEachTsvRow(const unsigned char *gz, idx_t gz_size, FN fn) {
 	auto content = GZipFileSystem::UncompressGZIPString(string(reinterpret_cast<const char *>(gz), gz_size));
 	for (auto &line : StringUtil::Split(content, '\n')) {
 		auto tab = line.find('\t');
-		if (line[0] == '#' || tab == string::npos) {
+		if (line.empty() || line[0] == '#' || tab == string::npos) {
 			continue;
 		}
 		fn(line.substr(0, tab), line.substr(tab + 1));
@@ -42,6 +42,10 @@ DictionaryIndex::DictionaryIndex() {
 			types[item] = LogicalType::BIGINT;
 		} else {
 			types[item] = LogicalType::VARCHAR;
+		}
+		auto dot = item.find('.');
+		if (dot != string::npos && !item.empty() && item[0] == '_') {
+			columns[item.substr(1, dot - 1)].push_back(item.substr(dot + 1));
 		}
 	});
 	MmcifForEachTsvRow(MMCIFF_RELATIONSHIPS_GZ, MMCIFF_RELATIONSHIPS_GZ_SIZE,
@@ -65,11 +69,14 @@ string DictionaryIndex::GetCategoryUrl(const string &category) const {
 string DictionaryIndex::GetItemUrl(const string &category, const string &column) const {
 	auto key = "_" + category + "." + column;
 	auto entry = types.find(key);
-	// Prefer the dictionary's canonical spelling when it is available. Some
-	// valid items (including _atom_site.id) are not present in the type index,
-	// so fall back to the spelling used by the file.
+	// Prefer the dictionary's canonical spelling; custom items use the file spelling.
 	auto &item = entry != types.end() ? entry->first : key;
 	return "https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/" + item + ".html";
+}
+
+const vector<string> *DictionaryIndex::GetColumns(const string &category) const {
+	auto entry = columns.find(category);
+	return entry == columns.end() ? nullptr : &entry->second;
 }
 
 const std::vector<std::pair<std::string, std::string>> &DictionaryIndex::GetRelationships() const {

@@ -30,8 +30,8 @@ SELECT function_name, parameters, parameter_types FROM duckdb_functions() WHERE 
 mmcif_blocks	[file]	[VARCHAR]
 mmcif_columns	[file, data_block]	[VARCHAR, VARCHAR]
 mmcif_relationships	[file, data_block]	[VARCHAR, VARCHAR]
-mmcif_scan	[file, table, data_block]	[VARCHAR, VARCHAR, VARCHAR]
-mmcif_scan	[file, table, data_block]	['VARCHAR[]', VARCHAR, VARCHAR]
+mmcif_scan	[file, table, data_block, column_source]	[VARCHAR, VARCHAR, VARCHAR, VARCHAR]
+mmcif_scan	[file, table, data_block, column_source]	['VARCHAR[]', VARCHAR, VARCHAR, VARCHAR]
 mmcif_tables	[file, data_block]	[VARCHAR, VARCHAR]
 
 query TIII

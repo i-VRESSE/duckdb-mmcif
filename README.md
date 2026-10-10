@@ -119,6 +119,27 @@ produces DuckDB's no-files error. Gzip files work alongside plain CIF.
 `data_block := 'name'` selects that block in every matched file; a file missing
 that block causes an error.
 
+By default, `column_source := 'files'` discovers the union of columns by reading
+all matched files before returning rows. For large collections of dictionary
+categories, use the bundled definitions to avoid that discovery pass:
+
+```sql
+SELECT filename, id, Cartn_x
+FROM mmcif_scan('structures/**/*.cif.gz', 'atom_site',
+                column_source := 'dictionary')
+LIMIT 10;
+```
+
+This mode opens files as execution advances and keeps one active file index per
+scan. It exposes all dictionary columns, including columns absent from every
+input; missing values are typed `NULL`. A known category absent from all files
+returns an empty result. Unknown categories fail at binding; unknown items in
+the requested category fail when their file is reached, with guidance to use
+`column_source := 'files'`. File and block errors are also deferred until that
+file is read. Glob expansion still happens before execution, and each active
+file is fully decompressed and indexed, so memory depends on its size. Multiple
+category scans each read their input independently.
+
 `ATTACH` requires one exact file path. Multi-file access is provided by
 `mmcif_scan`; the metadata functions (`mmcif_tables`, `mmcif_columns`,
 `mmcif_relationships`, and `mmcif_blocks`) take one file.

@@ -18,9 +18,11 @@ Usage:
 
 import sys
 import gzip
+import hashlib
 
 SOURCE_URL = "https://mmcif.wwpdb.org/dictionaries/ascii/mmcif_pdbx_v50.dic"
 DIC_VERSION = "5.417"
+SOURCE_SHA256 = "758c946b80dd4b3e408b8b199a7f8233cfa5726b380baa9c767c5fb6ed81e28e"
 
 # dictionary type code -> DuckDB type (research 03 / ticket 03)
 NUMERIC_FLOAT = {"float", "float-range"}
@@ -71,7 +73,7 @@ def parse_dict(path):
     """
     item_type = None  # current saveframe's _item_type.code
     pdbx_item_type = None  # current saveframe's _pdbx_item_type.code
-    item_name = None  # current saveframe's _item.name
+    item_name = None  # item identified by the current saveframe
     items = []
     in_save = False
 
@@ -96,13 +98,13 @@ def parse_dict(path):
                 in_save = True
                 item_type = None
                 pdbx_item_type = None
-                item_name = None
+                # _item.name may be a loop listing related items. The item
+                # saveframe itself identifies the definition unambiguously.
+                frame_name = line[5:]
+                item_name = frame_name if frame_name.startswith("_") and "." in frame_name else None
                 continue
             if in_save:
-                if line.startswith("_item.name"):
-                    parts = line.split(None, 1)
-                    item_name = parts[1].strip().strip('"') if len(parts) > 1 else None
-                elif line.startswith("_pdbx_item_type.code"):
+                if line.startswith("_pdbx_item_type.code"):
                     pdbx_item_type = line.split(None, 1)[1].strip()
                 elif line.startswith("_item_type.code"):
                     item_type = line.split(None, 1)[1].strip()
@@ -154,10 +156,11 @@ def parse_dict(path):
 
 
 def write_gz(out_path, header, rows):
-    with gzip.open(out_path, "wt", encoding="utf-8", newline="") as gz:
-        gz.write(header)
-        for row in rows:
-            gz.write("%s\n" % row)
+    # No timestamp or output filename in the gzip header: byte-reproducible.
+    content = header + "".join("%s\n" % row for row in rows)
+    with open(out_path, "wb") as output:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=0) as gz:
+            gz.write(content.encode("utf-8"))
     print("wrote %s: %d rows" % (out_path, len(rows)))
 
 
@@ -167,6 +170,9 @@ def main():
         return 1
     dict_path, type_out, rel_out = sys.argv[1], sys.argv[2], sys.argv[3]
 
+    with open(dict_path, "rb") as source:
+        if hashlib.sha256(source.read()).hexdigest() != SOURCE_SHA256:
+            raise ValueError("Dictionary source checksum differs; review and update SOURCE_SHA256 and DIC_VERSION")
     items, relationships = parse_dict(dict_path)
 
     type_rows = []

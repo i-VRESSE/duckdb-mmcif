@@ -84,6 +84,8 @@ When a new [PDBx/mmCIF dictionary](https://mmcif.wwpdb.org/pdbx-mmcif-home-page.
 
    - Set `DIC_VERSION` in `scripts/generate_type_index.py` to the version in the
      downloaded dictionary.
+   - Set `SOURCE_SHA256` to the downloaded file's SHA-256 checksum. The
+     generator verifies it before parsing so upstream changes require review.
    - If the download location changed, update `SOURCE_URL` in that script.
    - If the dictionary path or filename changed, replace the documentation base
      URL (`https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic`) everywhere
@@ -100,7 +102,7 @@ When a new [PDBx/mmCIF dictionary](https://mmcif.wwpdb.org/pdbx-mmcif-home-page.
        dict/mmcif_pdbx_v50_relationships.tsv.gz
    ```
 
-4. Review the generated files and run `make test` and `make test_cpp` before
+4. Review the generated files and run `make test_dictionary`, `make test` and `make test_cpp` before
    committing the script metadata and both files under `dict/` together.
 
 ## AI Declaration

@@ -40,7 +40,13 @@ bool MmcifBindData::Equals(const FunctionData &other) const {
 struct MmcifGlobalState : public GlobalTableFunctionState {
 	MmcifGlobalState(const MmcifBindData &bind_p, const vector<column_t> &column_ids_p)
 	    : bind(bind_p), column_ids(column_ids_p), position(0) {
-		if (!bind.files.empty()) {
+		if (bind.dictionary_schema) {
+			for (idx_t c = 0; c < bind.column_names.size(); c++) {
+				if (c != bind.filename_column) {
+					dictionary_columns[bind.column_names[c]] = c;
+				}
+			}
+		} else if (!bind.files.empty()) {
 			StartFile(0);
 		} else if (bind.index && bind.category) {
 			StartCategory(bind.index, bind.category, nullptr);
@@ -81,6 +87,39 @@ struct MmcifGlobalState : public GlobalTableFunctionState {
 		auto &file = bind.files[file_idx];
 		StartCategory(file.index, file.category, &file.local_to_union);
 	}
+
+	bool NextDictionaryFile(ClientContext &context) {
+		// The output owns projected VARCHAR cells, so the previous arena can die.
+		cursor.reset();
+		category = nullptr;
+		single_by_col.clear();
+		index.reset();
+		while (next_path < bind.paths.size()) {
+			file_position = next_path++;
+			auto loaded =
+			    MmcifIndex::Load(bind.paths[file_position], &context, bind.has_data_block ? &bind.data_block : nullptr);
+			auto cat = loaded->FindCategory(bind.table_name);
+			if (!cat || cat->columns.empty()) {
+				continue;
+			}
+			vector<idx_t> mapping;
+			for (auto &name : cat->columns) {
+				auto found = dictionary_columns.find(name);
+				if (found == dictionary_columns.end()) {
+					throw InvalidInputException("mmcif: item '%s.%s' in '%s' is not in the bundled dictionary; use "
+					                            "column_source := 'files' for custom items",
+					                            bind.table_name, name, bind.paths[file_position]);
+				}
+				mapping.push_back(found->second);
+			}
+			StartCategory(std::move(loaded), cat, &mapping);
+			return true;
+		}
+		return false;
+	}
+
+	idx_t next_path = 0;
+	case_insensitive_map_t<idx_t> dictionary_columns;
 
 	shared_ptr<MmcifIndex> index;
 	MmcifCategory *category = nullptr;
@@ -188,11 +227,51 @@ static unique_ptr<FunctionData> MmcifBind(ClientContext &context, TableFunctionB
 	auto result = make_uniq<MmcifBindData>();
 
 	auto data_block = MmcifDataBlock(input);
-	vector<shared_ptr<MmcifIndex>> indexes;
-	for (auto &path : paths) {
-		indexes.push_back(MmcifIndex::Load(path, &context, data_block.get()));
+	auto column_source = input.named_parameters.find("column_source");
+	string column_source_mode = "files";
+	if (column_source != input.named_parameters.end()) {
+		if (column_source->second.IsNull()) {
+			throw BinderException("mmcif: column_source must be 'files' or 'dictionary', not NULL");
+		}
+		column_source_mode = StringUtil::Lower(column_source->second.GetValue<string>());
 	}
-	MmcifBindFiles(*result, paths, indexes, table_name);
+	if (column_source_mode == "dictionary") {
+		auto columns = DictionaryIndex::Get().GetColumns(table_name);
+		if (!columns) {
+			throw BinderException("mmcif: category '%s' is not in the bundled dictionary; use column_source := 'files' "
+			                      "for custom categories",
+			                      table_name);
+		}
+		result->dictionary_schema = true;
+		result->paths = std::move(paths);
+		result->table_name = table_name;
+		result->has_data_block = bool(data_block);
+		if (data_block) {
+			result->data_block = *data_block;
+		}
+		result->column_names.assign(columns->begin(), columns->end());
+		for (auto &name : *columns) {
+			result->column_types.push_back(DictionaryIndex::Get().LookupType(table_name, name));
+		}
+		if (result->paths.size() > 1) {
+			for (auto &name : *columns) {
+				if (StringUtil::CIEquals(name, "filename")) {
+					throw BinderException("mmcif: category '%s' already contains a filename column", table_name);
+				}
+			}
+			result->filename_column = result->column_names.size();
+			result->column_names.push_back("filename");
+			result->column_types.push_back(LogicalType::VARCHAR);
+		}
+	} else if (column_source_mode == "files") {
+		vector<shared_ptr<MmcifIndex>> indexes;
+		for (auto &path : paths) {
+			indexes.push_back(MmcifIndex::Load(path, &context, data_block.get()));
+		}
+		MmcifBindFiles(*result, paths, indexes, table_name);
+	} else {
+		throw BinderException("mmcif: column_source must be 'files' or 'dictionary'");
+	}
 	names.assign(result->column_names.begin(), result->column_names.end());
 	return_types.assign(result->column_types.begin(), result->column_types.end());
 	return std::move(result);
@@ -231,7 +310,10 @@ static idx_t MmcifScanIndex(DataChunk &output, MmcifGlobalState &gstate, vector<
 						FlatVector::SetNull(*tmp[out_pos], count, true);
 					} else {
 						MmcifUnquote(out, len);
-						ptrs[out_pos][count] = string_t(out, UnsafeNumericCast<uint32_t>(len));
+						ptrs[out_pos][count] =
+						    gstate.bind.dictionary_schema && output.data[out_pos].GetType() == LogicalType::VARCHAR
+						        ? StringVector::AddString(*tmp[out_pos], out, len)
+						        : string_t(out, UnsafeNumericCast<uint32_t>(len));
 					}
 				}
 			}
@@ -274,7 +356,9 @@ static idx_t MmcifScanIndex(DataChunk &output, MmcifGlobalState &gstate, vector<
 					const char *value = gstate.index->GetData() + sc->off;
 					idx_t len = sc->len;
 					MmcifUnquote(value, len);
-					ptrs[c][0] = string_t(value, UnsafeNumericCast<uint32_t>(len));
+					ptrs[c][0] = gstate.bind.dictionary_schema && output.data[c].GetType() == LogicalType::VARCHAR
+					                 ? StringVector::AddString(*tmp[c], value, len)
+					                 : string_t(value, UnsafeNumericCast<uint32_t>(len));
 				} else {
 					FlatVector::SetNull(*tmp[c], 0, true);
 				}
@@ -316,6 +400,10 @@ static idx_t MmcifScanStore(DataChunk &output, MmcifGlobalState &gstate, vector<
 // dictionary type in one vectorized pass.
 static void MmcifScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &gstate = data.global_state->Cast<MmcifGlobalState>();
+	if (gstate.bind.dictionary_schema && !gstate.category && !gstate.NextDictionaryFile(context)) {
+		output.SetCardinality(0);
+		return;
+	}
 	idx_t out_cols = output.ColumnCount();
 	vector<unique_ptr<Vector>> tmp(out_cols);
 	vector<string_t *> ptrs(out_cols);
@@ -334,15 +422,25 @@ static void MmcifScan(ClientContext &context, TableFunctionInput &data, DataChun
 		}
 		count = gstate.bind.write_category ? MmcifScanStore(output, gstate, tmp, ptrs)
 		                                   : MmcifScanIndex(output, gstate, tmp, ptrs);
-		if (count || gstate.bind.files.empty() || gstate.file_position + 1 == gstate.bind.files.size()) {
+		if (count) {
 			break;
 		}
-		gstate.StartFile(gstate.file_position + 1);
+		if (gstate.bind.dictionary_schema) {
+			if (!gstate.NextDictionaryFile(context)) {
+				break;
+			}
+		} else {
+			if (gstate.bind.files.empty() || gstate.file_position + 1 == gstate.bind.files.size()) {
+				break;
+			}
+			gstate.StartFile(gstate.file_position + 1);
+		}
 	}
 	if (gstate.bind.filename_column != DConstants::INVALID_INDEX) {
 		for (idx_t c = 0; c < out_cols; c++) {
 			if (gstate.column_ids[c] == gstate.bind.filename_column) {
-				tmp[c]->Reference(Value(gstate.bind.files[gstate.file_position].path));
+				tmp[c]->Reference(Value(gstate.bind.dictionary_schema ? gstate.bind.paths[gstate.file_position]
+				                                                      : gstate.bind.files[gstate.file_position].path));
 			}
 		}
 	}
@@ -360,6 +458,7 @@ TableFunction MmcifScanFunction() {
 	TableFunction result("mmcif_scan", {LogicalType::VARCHAR, LogicalType::VARCHAR}, MmcifScan, MmcifBind,
 	                     MmcifInitGlobal);
 	result.projection_pushdown = true;
+	result.named_parameters["column_source"] = LogicalType::VARCHAR;
 	return result;
 }
 
@@ -497,6 +596,10 @@ static void MmcifRegisterDescribed(ExtensionLoader &loader, TableFunction functi
 		function.named_parameters["data_block"] = LogicalType::VARCHAR;
 		parameter_names.push_back("data_block");
 		description += " Select a block with data_block := 'name'; defaults to the first block.";
+	}
+	if (function.name == "mmcif_scan") {
+		parameter_names.push_back("column_source");
+		description += " Use column_source := 'dictionary' to bind known dictionary columns and open files lazily.";
 	}
 	FunctionDescription desc;
 	desc.parameter_names = std::move(parameter_names);

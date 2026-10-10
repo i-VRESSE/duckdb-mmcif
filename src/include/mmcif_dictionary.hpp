@@ -28,11 +28,14 @@ public:
 	string GetItemUrl(const string &category, const string &column) const;
 
 	const std::vector<std::pair<std::string, std::string>> &GetRelationships() const;
+	// Complete category item names, in stable dictionary-artifact order.
+	const vector<string> *GetColumns(const string &category) const;
 
 private:
 	DictionaryIndex();
 
 	case_insensitive_map_t<LogicalType> types;
+	case_insensitive_map_t<vector<string>> columns;
 	std::vector<std::pair<std::string, std::string>> relationships;
 };
 
