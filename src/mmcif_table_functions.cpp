@@ -1,8 +1,9 @@
 // Per-category scan + metadata table functions module.
 //
-// Global scans union category schemas across expanded paths and stream one
-// file at a time. Attached scans use the same reader or a transaction's write
-// store, with their bind data pre-filled by GetScanFunction.
+// Global scans discover columns from files or use dictionary definitions.
+// Dictionary scans process files in parallel, using one reader per worker.
+// Attached scans use the same reader or a transaction's write store, with
+// their bind data pre-filled by GetScanFunction.
 
 #include "mmcif_table_functions.hpp"
 
@@ -16,7 +17,9 @@
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/storage/statistics/node_statistics.hpp"
 
@@ -40,21 +43,45 @@ bool MmcifBindData::Equals(const FunctionData &other) const {
 }
 
 struct MmcifGlobalState : public GlobalTableFunctionState {
-	MmcifGlobalState(const MmcifBindData &bind_p, const vector<column_t> &column_ids_p)
-	    : bind(bind_p), column_ids(column_ids_p), position(0) {
+	MmcifGlobalState(const MmcifBindData &bind_p, const vector<column_t> &column_ids_p, idx_t max_threads_p)
+	    : bind(bind_p), column_ids(column_ids_p), max_threads(max_threads_p),
+	      write_end(bind_p.write_category ? bind_p.write_category->rows.size() : 0) {
 		if (bind.dictionary_schema) {
 			for (idx_t c = 0; c < bind.column_names.size(); c++) {
 				if (c != bind.filename_column) {
 					dictionary_columns[bind.column_names[c]] = c;
 				}
 			}
-		} else if (!bind.files.empty()) {
-			StartFile(0);
-		} else if (bind.index && bind.category) {
-			StartCategory(bind.index, bind.category, nullptr);
+		}
+	}
+
+	idx_t MaxThreads() const override {
+		return max_threads;
+	}
+
+	const MmcifBindData &bind;
+	const vector<column_t> column_ids;
+	const idx_t max_threads;
+	const idx_t write_end;
+	case_insensitive_map_t<idx_t> dictionary_columns;
+	std::atomic<idx_t> next_path {0};
+	std::atomic<idx_t> completed_files {0};
+};
+
+struct MmcifLocalState : public LocalTableFunctionState {
+	explicit MmcifLocalState(MmcifGlobalState &global_p)
+	    : global(global_p), bind(global_p.bind), column_ids(global_p.column_ids), position(0) {
+		// Dictionary readers open their first file only when execution asks for
+		// a chunk, never during local-state initialization.
+		if (!bind.dictionary_schema) {
+			if (!bind.files.empty()) {
+				StartFile(0);
+			} else if (bind.index && bind.category) {
+				StartCategory(bind.index, bind.category, nullptr);
+			}
 		}
 		if (bind.write_category) {
-			write_end = bind.write_category->rows.size();
+			write_end = global.write_end;
 		}
 	}
 	void StartCategory(shared_ptr<MmcifIndex> index_p, MmcifCategory *category_p, const vector<idx_t> *mapping) {
@@ -94,26 +121,35 @@ struct MmcifGlobalState : public GlobalTableFunctionState {
 		// Publish completed files before opening the next one. Progress is polled
 		// from another thread, which must not inspect the mutable reader state.
 		if (category) {
-			completed_files.store(file_position + 1);
+			global.completed_files.fetch_add(1);
 		}
 		// The output owns projected VARCHAR cells, so the previous arena can die.
 		cursor.reset();
 		category = nullptr;
 		single_by_col.clear();
 		index.reset();
-		while (next_path < bind.paths.size()) {
-			file_position = next_path++;
+		while (true) {
+			// Claim a path without holding a lock during I/O or parsing. A worker
+			// releases its previous index before claiming another file.
+			if (context.IsInterrupted()) {
+				throw InterruptException();
+			}
+			auto claimed = global.next_path.fetch_add(1);
+			if (claimed >= bind.paths.size()) {
+				return false;
+			}
+			file_position = claimed;
 			auto loaded =
 			    MmcifIndex::Load(bind.paths[file_position], &context, bind.has_data_block ? &bind.data_block : nullptr);
 			auto cat = loaded->FindCategory(bind.table_name);
 			if (!cat || cat->columns.empty()) {
-				completed_files.store(file_position + 1);
+				global.completed_files.fetch_add(1);
 				continue;
 			}
 			vector<idx_t> mapping;
 			for (auto &name : cat->columns) {
-				auto found = dictionary_columns.find(name);
-				if (found == dictionary_columns.end()) {
+				auto found = global.dictionary_columns.find(name);
+				if (found == global.dictionary_columns.end()) {
 					throw InvalidInputException("mmcif: item '%s.%s' in '%s' is not in the bundled dictionary; use "
 					                            "column_source := 'files' for custom items",
 					                            bind.table_name, name, bind.paths[file_position]);
@@ -123,12 +159,9 @@ struct MmcifGlobalState : public GlobalTableFunctionState {
 			StartCategory(std::move(loaded), cat, &mapping);
 			return true;
 		}
-		return false;
 	}
 
-	std::atomic<idx_t> completed_files {0};
-	idx_t next_path = 0;
-	case_insensitive_map_t<idx_t> dictionary_columns;
+	MmcifGlobalState &global;
 
 	shared_ptr<MmcifIndex> index;
 	MmcifCategory *category = nullptr;
@@ -146,10 +179,6 @@ struct MmcifGlobalState : public GlobalTableFunctionState {
 	idx_t write_end = 0;
 	bool done = false;
 	bool single_done = false;
-
-	idx_t MaxThreads() const override {
-		return 1;
-	}
 };
 
 void MmcifBindIndex(MmcifBindData &result, shared_ptr<MmcifIndex> index, const string &table_name) {
@@ -288,30 +317,38 @@ static unique_ptr<FunctionData> MmcifBind(ClientContext &context, TableFunctionB
 
 static unique_ptr<GlobalTableFunctionState> MmcifInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind = input.bind_data->Cast<MmcifBindData>();
-	return make_uniq<MmcifGlobalState>(bind, input.column_ids);
+	auto max_threads = bind.dictionary_schema
+	                       ? MinValue<idx_t>(bind.paths.size(), TaskScheduler::GetScheduler(context).NumberOfThreads())
+	                       : idx_t(1);
+	return make_uniq<MmcifGlobalState>(bind, input.column_ids, MaxValue<idx_t>(1, max_threads));
+}
+
+static unique_ptr<LocalTableFunctionState> MmcifInitLocal(ExecutionContext &context, TableFunctionInitInput &input,
+                                                          GlobalTableFunctionState *global_state) {
+	return make_uniq<MmcifLocalState>(global_state->Cast<MmcifGlobalState>());
 }
 
 // Index-backed scan: parse the category's loop range
 // incrementally from the byte cursor, row-major, into per-column VARCHAR
 // vectors, then vectorized-cast each column to its dictionary type. LIMIT
 // pushdown falls out naturally: we stop after the requested rows are filled.
-static idx_t MmcifScanIndex(DataChunk &output, MmcifGlobalState &gstate, vector<unique_ptr<Vector>> &tmp,
+static idx_t MmcifScanIndex(DataChunk &output, MmcifLocalState &lstate, vector<unique_ptr<Vector>> &tmp,
                             vector<string_t *> &ptrs) {
-	auto &cat = *gstate.category;
+	auto &cat = *lstate.category;
 	idx_t out_cols = output.ColumnCount();
 
 	idx_t count = 0;
 	if (cat.is_loop) {
 		idx_t loop_ncols = cat.loop_col_map.size();
-		while (count < STANDARD_VECTOR_SIZE && !gstate.done) {
+		while (count < STANDARD_VECTOR_SIZE && !lstate.done) {
 			idx_t li = 0;
 			for (; li < loop_ncols; li++) {
-				idx_t out_pos = gstate.full_to_out[cat.loop_col_map[li]];
+				idx_t out_pos = lstate.full_to_out[cat.loop_col_map[li]];
 				const char *out;
 				idx_t len;
 				bool is_null;
-				if (!gstate.cursor->Next(&out, &len, &is_null)) {
-					gstate.done = true;
+				if (!lstate.cursor->Next(&out, &len, &is_null)) {
+					lstate.done = true;
 					break;
 				}
 				if (out_pos != DConstants::INVALID_INDEX) {
@@ -320,7 +357,7 @@ static idx_t MmcifScanIndex(DataChunk &output, MmcifGlobalState &gstate, vector<
 					} else {
 						MmcifUnquote(out, len);
 						ptrs[out_pos][count] =
-						    gstate.bind.dictionary_schema && output.data[out_pos].GetType() == LogicalType::VARCHAR
+						    lstate.bind.dictionary_schema && output.data[out_pos].GetType() == LogicalType::VARCHAR
 						        ? StringVector::AddString(*tmp[out_pos], out, len)
 						        : string_t(out, UnsafeNumericCast<uint32_t>(len));
 					}
@@ -331,41 +368,41 @@ static idx_t MmcifScanIndex(DataChunk &output, MmcifGlobalState &gstate, vector<
 			}
 			// A partial trailing row: its missing values are NULL.
 			for (; li < loop_ncols; li++) {
-				idx_t out_pos = gstate.full_to_out[cat.loop_col_map[li]];
+				idx_t out_pos = lstate.full_to_out[cat.loop_col_map[li]];
 				if (out_pos != DConstants::INVALID_INDEX) {
 					FlatVector::SetNull(*tmp[out_pos], count, true);
 				}
 			}
 			for (idx_t c = 0; c < out_cols; c++) {
-				auto col_id = gstate.column_ids[c];
+				auto col_id = lstate.column_ids[c];
 				if (col_id == COLUMN_IDENTIFIER_ROW_ID) {
-					output.data[c].SetValue(count, Value::Numeric(LogicalType::BIGINT, gstate.position));
+					output.data[c].SetValue(count, Value::Numeric(LogicalType::BIGINT, lstate.position));
 				} else if (col_id == COLUMN_IDENTIFIER_EMPTY) {
 					output.data[c].SetValue(count, Value(true));
 				}
 			}
 			count++;
-			gstate.position++;
+			lstate.position++;
 		}
 	} else {
 		// Single-tag category: exactly one row.
-		if (gstate.single_done) {
+		if (lstate.single_done) {
 			return 0;
 		}
 		for (idx_t c = 0; c < out_cols; c++) {
-			auto col_id = gstate.column_ids[c];
+			auto col_id = lstate.column_ids[c];
 			if (col_id == COLUMN_IDENTIFIER_ROW_ID) {
 				output.data[c].SetValue(0, Value::Numeric(LogicalType::BIGINT, 0));
 			} else if (col_id == COLUMN_IDENTIFIER_EMPTY) {
 				output.data[c].SetValue(0, Value(true));
 			} else {
-				auto local = gstate.out_to_full[c];
-				auto sc = local < gstate.ncols ? gstate.single_by_col[local] : nullptr;
+				auto local = lstate.out_to_full[c];
+				auto sc = local < lstate.ncols ? lstate.single_by_col[local] : nullptr;
 				if (sc && !sc->is_null) {
-					const char *value = gstate.index->GetData() + sc->off;
+					const char *value = lstate.index->GetData() + sc->off;
 					idx_t len = sc->len;
 					MmcifUnquote(value, len);
-					ptrs[c][0] = gstate.bind.dictionary_schema && output.data[c].GetType() == LogicalType::VARCHAR
+					ptrs[c][0] = lstate.bind.dictionary_schema && output.data[c].GetType() == LogicalType::VARCHAR
 					                 ? StringVector::AddString(*tmp[c], value, len)
 					                 : string_t(value, UnsafeNumericCast<uint32_t>(len));
 				} else {
@@ -374,7 +411,7 @@ static idx_t MmcifScanIndex(DataChunk &output, MmcifGlobalState &gstate, vector<
 			}
 		}
 		count = 1;
-		gstate.single_done = true;
+		lstate.single_done = true;
 	}
 
 	return count;
@@ -383,16 +420,16 @@ static idx_t MmcifScanIndex(DataChunk &output, MmcifGlobalState &gstate, vector<
 // Write-mode scan: the store's rows, by index (an INSERT sink may grow the row
 // vector between chunks). Cells are copied into the vector because an UPDATE
 // sink overwrites store cells while this chunk's values are still in use.
-static idx_t MmcifScanStore(DataChunk &output, MmcifGlobalState &gstate, vector<unique_ptr<Vector>> &tmp,
+static idx_t MmcifScanStore(DataChunk &output, MmcifLocalState &lstate, vector<unique_ptr<Vector>> &tmp,
                             vector<string_t *> &ptrs) {
-	auto &rows = gstate.bind.write_category->rows;
+	auto &rows = lstate.bind.write_category->rows;
 	idx_t count = 0;
-	for (; gstate.position < gstate.write_end && count < STANDARD_VECTOR_SIZE; gstate.position++, count++) {
-		auto &row = rows[gstate.position];
+	for (; lstate.position < lstate.write_end && count < STANDARD_VECTOR_SIZE; lstate.position++, count++) {
+		auto &row = rows[lstate.position];
 		for (idx_t c = 0; c < output.ColumnCount(); c++) {
-			auto col_id = gstate.column_ids[c];
+			auto col_id = lstate.column_ids[c];
 			if (col_id == COLUMN_IDENTIFIER_ROW_ID) {
-				output.data[c].SetValue(count, Value::Numeric(LogicalType::BIGINT, gstate.position));
+				output.data[c].SetValue(count, Value::Numeric(LogicalType::BIGINT, lstate.position));
 			} else if (col_id == COLUMN_IDENTIFIER_EMPTY) {
 				output.data[c].SetValue(count, Value(true));
 			} else if (MmcifBindData::IsNullCell(row[col_id])) {
@@ -408,8 +445,8 @@ static idx_t MmcifScanStore(DataChunk &output, MmcifGlobalState &gstate, vector<
 // Both modes fill per-column VARCHAR vectors, then cast each column to its
 // dictionary type in one vectorized pass.
 static void MmcifScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
-	auto &gstate = data.global_state->Cast<MmcifGlobalState>();
-	if (gstate.bind.dictionary_schema && !gstate.category && !gstate.NextDictionaryFile(context)) {
+	auto &lstate = data.local_state->Cast<MmcifLocalState>();
+	if (lstate.bind.dictionary_schema && !lstate.category && !lstate.NextDictionaryFile(context)) {
 		output.SetCardinality(0);
 		return;
 	}
@@ -425,37 +462,40 @@ static void MmcifScan(ClientContext &context, TableFunctionInput &data, DataChun
 		// Missing union columns start as NULL for each file/chunk.
 		for (idx_t c = 0; c < out_cols; c++) {
 			FlatVector::Validity(*tmp[c]).SetAllValid(STANDARD_VECTOR_SIZE);
-			if (!gstate.bind.write_category && gstate.out_to_full[c] == DConstants::INVALID_INDEX) {
+			if (!lstate.bind.write_category && lstate.out_to_full[c] == DConstants::INVALID_INDEX) {
 				FlatVector::Validity(*tmp[c]).SetAllInvalid(STANDARD_VECTOR_SIZE);
 			}
 		}
-		count = gstate.bind.write_category ? MmcifScanStore(output, gstate, tmp, ptrs)
-		                                   : MmcifScanIndex(output, gstate, tmp, ptrs);
+		count = lstate.bind.write_category ? MmcifScanStore(output, lstate, tmp, ptrs)
+		                                   : MmcifScanIndex(output, lstate, tmp, ptrs);
 		if (count) {
 			break;
 		}
-		if (gstate.bind.dictionary_schema) {
-			if (!gstate.NextDictionaryFile(context)) {
+		if (lstate.bind.dictionary_schema) {
+			if (!lstate.NextDictionaryFile(context)) {
 				break;
 			}
 		} else {
-			gstate.completed_files.store(gstate.file_position + 1);
-			if (gstate.bind.files.empty() || gstate.file_position + 1 == gstate.bind.files.size()) {
+			lstate.global.completed_files.store(lstate.file_position + 1);
+			if (lstate.bind.files.empty() || lstate.file_position + 1 == lstate.bind.files.size()) {
 				break;
 			}
-			gstate.StartFile(gstate.file_position + 1);
+			lstate.StartFile(lstate.file_position + 1);
 		}
 	}
-	if (gstate.bind.filename_column != DConstants::INVALID_INDEX) {
+	if (lstate.bind.filename_column != DConstants::INVALID_INDEX) {
 		for (idx_t c = 0; c < out_cols; c++) {
-			if (gstate.column_ids[c] == gstate.bind.filename_column) {
-				tmp[c]->Reference(Value(gstate.bind.dictionary_schema ? gstate.bind.paths[gstate.file_position]
-				                                                      : gstate.bind.files[gstate.file_position].path));
+			if (lstate.column_ids[c] == lstate.bind.filename_column) {
+				// The missing-column mask must not survive into a filename
+				// constant, especially when downstream storage flattens it.
+				FlatVector::Validity(*tmp[c]).SetAllValid(STANDARD_VECTOR_SIZE);
+				tmp[c]->Reference(Value(lstate.bind.dictionary_schema ? lstate.bind.paths[lstate.file_position]
+				                                                      : lstate.bind.files[lstate.file_position].path));
 			}
 		}
 	}
 	for (idx_t c = 0; c < out_cols; c++) {
-		auto col_id = gstate.column_ids[c];
+		auto col_id = lstate.column_ids[c];
 		if (col_id == COLUMN_IDENTIFIER_ROW_ID || col_id == COLUMN_IDENTIFIER_EMPTY) {
 			continue;
 		}
@@ -486,9 +526,16 @@ static unique_ptr<NodeStatistics> MmcifScanCardinality(ClientContext &context, c
 	return make_uniq<NodeStatistics>(files);
 }
 
+// A file is a monotonically increasing batch for each worker. DuckDB can
+// merge batches in input order when insertion-order preservation is requested.
+static OperatorPartitionData MmcifScanPartition(ClientContext &context, TableFunctionGetPartitionInput &input) {
+	return OperatorPartitionData(input.local_state->Cast<MmcifLocalState>().file_position);
+}
+
 TableFunction MmcifScanFunction() {
 	TableFunction result("mmcif_scan", {LogicalType::VARCHAR, LogicalType::VARCHAR}, MmcifScan, MmcifBind,
-	                     MmcifInitGlobal);
+	                     MmcifInitGlobal, MmcifInitLocal);
+	result.get_partition_data = MmcifScanPartition;
 	result.projection_pushdown = true;
 	result.table_scan_progress = MmcifScanProgress;
 	result.cardinality = MmcifScanCardinality;

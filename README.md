@@ -130,8 +130,9 @@ FROM mmcif_scan('structures/**/*.cif.gz', 'atom_site',
 LIMIT 10;
 ```
 
-This mode opens files as execution advances and keeps one active file index per
-scan. It exposes all dictionary columns, including columns absent from every
+This mode opens files as execution advances, using DuckDB workers to read
+multiple files in parallel. Each worker keeps one active file index; the number
+of readers is capped by the input file count and DuckDB's `threads` setting. It exposes all dictionary columns, including columns absent from every
 input; missing values are typed `NULL`. A known category absent from all files
 returns an empty result. Unknown categories fail at binding; unknown items in
 the requested category fail when their file is reached, with guidance to use
@@ -152,9 +153,20 @@ dictionary mode. Files have equal weight, so large files can make the bar pause.
 The callback reports execution progress; glob expansion and default file-based
 column discovery happen during binding and have no progress feedback.
 
-Each scan currently reads files sequentially, even with more DuckDB threads.
-Independent scans can run concurrently: [count_parallel.sql](docs/examples/count_parallel.sql)
-splits a collection across six scans and sums their atom counts.
+Use a single scan for parallel aggregates:
+
+```sql
+SET threads = 6;
+SELECT count(*) FROM mmcif_scan('structures/**/*.cif.gz', 'atom_site',
+                              column_source := 'dictionary');
+```
+
+Reduce `threads` to limit active file buffers; `SET threads = 1` uses one reader.
+DuckDB controls which queries can execute in parallel. With its default
+insertion-order preservation, file batch indices retain input order when
+materializing rows, and a simple `LIMIT` uses one reader to avoid unnecessary
+file reads. Other queries can open several files before returning rows.
+[See the runnable parallel-count example](docs/examples/count_parallel.sql).
 
 `ATTACH` requires one exact file path. Multi-file access is provided by
 `mmcif_scan`; the metadata functions (`mmcif_tables`, `mmcif_columns`,

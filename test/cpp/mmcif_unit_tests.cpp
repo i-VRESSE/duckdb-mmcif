@@ -16,6 +16,8 @@
 #include "mmcif_patch.hpp"
 #include "mmcif_table_functions.hpp"
 #include "mmcif_write_store.hpp"
+#include "duckdb/execution/execution_context.hpp"
+#include "duckdb/parallel/thread_context.hpp"
 
 #include <cstring>
 #include <filesystem>
@@ -838,7 +840,10 @@ TEST_CASE("mmcif scan progress counts completed files without reading ahead", "[
 	TableFunctionInitInput init(&bind, vector<column_t> {0}, {}, nullptr);
 	auto state = function.init_global(context, init);
 	REQUIRE(function.table_scan_progress(context, &bind, state.get()) == 0.0);
-	TableFunctionInput input(&bind, nullptr, state.get());
+	ThreadContext thread(context);
+	ExecutionContext execution(context, thread, nullptr);
+	auto local = function.init_local(execution, init, state.get());
+	TableFunctionInput input(&bind, local.get(), state.get());
 	DataChunk output;
 	output.Initialize(context, {LogicalType::VARCHAR});
 	for (idx_t step = 0; step < counts.size(); step++) {
@@ -846,5 +851,73 @@ TEST_CASE("mmcif scan progress counts completed files without reading ahead", "[
 		function.function(context, input, output);
 		REQUIRE(output.size() == counts[step]);
 		REQUIRE(function.table_scan_progress(context, &bind, state.get()) == Approx(expected[step]));
+	}
+}
+
+TEST_CASE("parallel mmcif workers keep independent cursors and completed-file progress", "[mmcif][parallel]") {
+	std::string content = "data_large\nloop_\n_atom_site.id\n";
+	for (idx_t row = 0; row <= STANDARD_VECTOR_SIZE; row++) {
+		content += std::to_string(row) + "\n";
+	}
+	TempCif large("parallel_large.cif", content);
+	TempCif small("parallel_small.cif", "data_small\n_atom_site.id last\n");
+	TempCif missing("parallel_missing.cif", "data_missing\n_entry.id missing\n");
+	TempCif empty("parallel_empty.cif", "data_empty\nloop_\n_atom_site.id\n");
+	DuckDB database(nullptr);
+	Connection connection(database);
+	REQUIRE_FALSE(connection.Query("SET threads=2")->HasError());
+	auto &context = *connection.context;
+	MmcifBindData bind;
+	bind.dictionary_schema = true;
+	bind.paths = {large.Str(), small.Str(), missing.Str(), empty.Str(), large.Str(), small.Str()};
+	bind.table_name = "atom_site";
+	bind.column_names = {"id"};
+	bind.column_types = {LogicalType::VARCHAR};
+	auto function = MmcifScanFunction();
+	TableFunctionInitInput init(&bind, vector<column_t> {0}, {}, nullptr);
+	auto global = function.init_global(context, init);
+	REQUIRE(global->MaxThreads() == 2);
+	ThreadContext thread(context);
+	ExecutionContext execution(context, thread, nullptr);
+	auto first = function.init_local(execution, init, global.get());
+	auto second = function.init_local(execution, init, global.get());
+	DataChunk output;
+	output.Initialize(context, {LogicalType::VARCHAR});
+	auto scan = [&](LocalTableFunctionState &local, idx_t count, double progress, const string &id) {
+		TableFunctionInput input(&bind, &local, global.get());
+		output.Reset();
+		function.function(context, input, output);
+		REQUIRE(output.size() == count);
+		if (count) {
+			REQUIRE(output.GetValue(0, 0).ToString() == id);
+		}
+		REQUIRE(function.table_scan_progress(context, &bind, global.get()) == Approx(progress));
+	};
+	// Worker two reaches a later duplicate of the large file while worker one
+	// still has unread rows in the first instance of the same cached index.
+	scan(*first, STANDARD_VECTOR_SIZE, 0.0, "0");
+	scan(*second, 1, 0.0, "last");
+	scan(*second, STANDARD_VECTOR_SIZE, 50.0, "0");
+	scan(*first, 1, 50.0, std::to_string(STANDARD_VECTOR_SIZE));
+	scan(*first, 1, 200.0 / 3.0, "last");
+	scan(*first, 0, 500.0 / 6.0, "");
+	// All paths have been claimed, but unfinished readers are not counted done.
+	scan(*second, 1, 500.0 / 6.0, std::to_string(STANDARD_VECTOR_SIZE));
+	scan(*second, 0, 100.0, "");
+
+	SECTION("reader count is also capped by the number of files") {
+		MmcifBindData single_bind = bind;
+		single_bind.paths = {small.Str()};
+		TableFunctionInitInput single_init(&single_bind, vector<column_t> {0}, {}, nullptr);
+		auto single = function.init_global(context, single_init);
+		REQUIRE(single->MaxThreads() == 1);
+	}
+	SECTION("interrupted scans stop between file reads") {
+		auto cancelled = function.init_global(context, init);
+		auto local = function.init_local(execution, init, cancelled.get());
+		TableFunctionInput input(&bind, local.get(), cancelled.get());
+		context.interrupted = true;
+		REQUIRE_THROWS_AS(function.function(context, input, output), InterruptException);
+		context.interrupted = false;
 	}
 }
