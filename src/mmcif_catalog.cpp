@@ -2,8 +2,8 @@
 // Catalog, the write-mode DML operators, the transaction manager, and the
 // storage-extension registration.
 //
-// Write-mode DML operators (D3): custom physical sinks that read the input
-// chunk and apply row-level mutations to the catalog's persistent write store.
+// Write-mode DML operators: custom physical sinks that read the input
+// chunk and apply row-level mutations to the transaction's private write store.
 // row_id == physical store row index (scans emit row_id = row index).
 
 #include "mmcif_catalog.hpp"
@@ -14,12 +14,17 @@
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/execution/physical_operator_states.hpp"
 #include "duckdb/parser/parsed_data/attach_info.hpp"
+#include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/operator/logical_delete.hpp"
+#include "duckdb/planner/operator/logical_insert.hpp"
+#include "duckdb/planner/operator/logical_update.hpp"
 #include "duckdb/storage/storage_extension.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
 
 #include "mmcif_dictionary.hpp"
 #include "mmcif_file.hpp"
+#include "mmcif_patch.hpp"
 #include "mmcif_table_functions.hpp"
 
 namespace duckdb {
@@ -34,46 +39,44 @@ static MmcifWriteCategory *MmcifGetWriteCategory(MmcifWriteStore &store, const s
 	return cat;
 }
 
-// Copy the store rows into the write-mode bind data (row-major snapshot; DML
-// mutates the store, not this copy).
-static void MmcifLoadRows(MmcifWriteCategory *cat, MmcifBindData &result) {
-	result.column_names = cat->columns;
-	result.rows = cat->rows;
-}
-
 // NULL -> empty cell -> written back as "?"
-static string MmcifCellToString(const Vector &vec, idx_t row) {
+static string MmcifCellToString(const Vector &vec, idx_t row, const MmcifWriteCategory &cat, idx_t col) {
 	auto val = vec.GetValue(row);
 	if (val.IsNull()) {
-		return ""; // NULL -> empty cell -> written back as "?"
+		return "";
 	}
-	return val.ToString();
+	auto str = val.ToString();
+	// Only a value holding ';' can be unwritable; fail the statement, not COMMIT.
+	if (str.find(';') != string::npos) {
+		MmcifPatch::CheckValue(str, cat.name + "." + cat.columns[col]);
+	}
+	return str;
 }
 
 // ---------------------------------------------------------------------------
-// Write-mode DML operators (D3)
+// Write-mode DML operators
 // ---------------------------------------------------------------------------
 
 struct MmcifWriteGlobalState : public GlobalSinkState {
 	idx_t count = 0;
-	mutex lock;
 	// DELETE row ids are accumulated across sink chunks and applied once in Combine:
 	// row ids refer to positions in the table as it was when the scan started, so
 	// applying them chunk-by-chunk would use stale indices after the first shrink.
-	std::vector<unsigned int> delete_indices;
+	std::vector<idx_t> delete_indices;
 };
 
-class MmcifInsertOperator : public PhysicalOperator {
+// Shared sink/source plumbing: a single-threaded, order-dependent sink that
+// returns the affected row count as one BIGINT.
+class MmcifWriteOperator : public PhysicalOperator {
 public:
-	MmcifInsertOperator(PhysicalPlan &physical_plan, vector<LogicalType> types, idx_t estimated_cardinality,
-	                    MmcifCatalog &catalog, string table_name, vector<idx_t> column_index_map)
-	    : PhysicalOperator(physical_plan, PhysicalOperatorType::INSERT, std::move(types), estimated_cardinality),
-	      catalog(catalog), table_name(std::move(table_name)), column_index_map(std::move(column_index_map)) {
+	MmcifWriteOperator(PhysicalPlan &physical_plan, PhysicalOperatorType type, vector<LogicalType> types,
+	                   idx_t estimated_cardinality, MmcifCatalog &catalog, string table_name)
+	    : PhysicalOperator(physical_plan, type, std::move(types), estimated_cardinality), catalog(catalog),
+	      table_name(std::move(table_name)) {
 	}
 
 	MmcifCatalog &catalog;
 	string table_name;
-	vector<idx_t> column_index_map; // empty => positional insert into all columns
 
 	bool IsSink() const override {
 		return true;
@@ -94,173 +97,119 @@ public:
 	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override {
 		return make_uniq<LocalSinkState>();
 	}
+	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override {
+		return make_uniq<GlobalSourceState>();
+	}
+	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                 OperatorSourceInput &input) const override {
+		auto &g = sink_state->Cast<MmcifWriteGlobalState>();
+		chunk.SetCardinality(1);
+		chunk.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(g.count)));
+		return SourceResultType::FINISHED;
+	}
+};
+
+class MmcifInsertOperator : public MmcifWriteOperator {
+public:
+	MmcifInsertOperator(PhysicalPlan &physical_plan, vector<LogicalType> types, idx_t estimated_cardinality,
+	                    MmcifCatalog &catalog, string table_name, vector<idx_t> column_index_map)
+	    : MmcifWriteOperator(physical_plan, PhysicalOperatorType::INSERT, std::move(types), estimated_cardinality,
+	                         catalog, std::move(table_name)),
+	      column_index_map(std::move(column_index_map)) {
+	}
+
+	vector<idx_t> column_index_map; // empty => positional insert into all columns
+
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override {
 		auto &gstate = input.global_state.Cast<MmcifWriteGlobalState>();
-		auto store = catalog.GetWriteStore();
-		auto cat = MmcifGetWriteCategory(*store, table_name);
+		auto &store = catalog.WriteStore(context.client);
+		auto cat = MmcifGetWriteCategory(store, table_name);
 		idx_t num_cols = cat->columns.size();
 		chunk.Flatten();
-		lock_guard<mutex> l(gstate.lock);
 		for (idx_t r = 0; r < chunk.size(); r++) {
 			std::vector<string> row(num_cols, "");
 			for (idx_t c = 0; c < num_cols; c++) {
 				if (column_index_map.empty()) {
-					row[c] = MmcifCellToString(chunk.data[c], r);
+					row[c] = MmcifCellToString(chunk.data[c], r, *cat, c);
 					continue;
 				}
 				auto mapped = column_index_map[c];
 				if (mapped == DConstants::INVALID_INDEX) {
 					continue; // unspecified column -> NULL
 				}
-				row[c] = MmcifCellToString(chunk.data[mapped], r);
+				row[c] = MmcifCellToString(chunk.data[mapped], r, *cat, c);
 			}
-			store->AddRow(*cat, row);
+			store.AddRow(*cat, row);
 			gstate.count++;
 		}
 		return SinkResultType::NEED_MORE_INPUT;
 	}
-	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override {
-		return make_uniq<GlobalSourceState>();
-	}
-	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
-	                                 OperatorSourceInput &input) const override {
-		auto &g = sink_state->Cast<MmcifWriteGlobalState>();
-		chunk.SetCardinality(1);
-		chunk.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(g.count)));
-		return SourceResultType::FINISHED;
-	}
 };
 
-class MmcifDeleteOperator : public PhysicalOperator {
+class MmcifDeleteOperator : public MmcifWriteOperator {
 public:
 	MmcifDeleteOperator(PhysicalPlan &physical_plan, vector<LogicalType> types, idx_t estimated_cardinality,
 	                    MmcifCatalog &catalog, string table_name, idx_t row_id_index)
-	    : PhysicalOperator(physical_plan, PhysicalOperatorType::DELETE_OPERATOR, std::move(types),
-	                       estimated_cardinality),
-	      catalog(catalog), table_name(std::move(table_name)), row_id_index(row_id_index) {
+	    : MmcifWriteOperator(physical_plan, PhysicalOperatorType::DELETE_OPERATOR, std::move(types),
+	                         estimated_cardinality, catalog, std::move(table_name)),
+	      row_id_index(row_id_index) {
 	}
 
-	MmcifCatalog &catalog;
-	string table_name;
 	idx_t row_id_index;
 
-	bool IsSink() const override {
-		return true;
-	}
-	bool ParallelSink() const override {
-		return false;
-	}
-	bool SinkOrderDependent() const override {
-		return true;
-	}
-	bool IsSource() const override {
-		return true;
-	}
-
-	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override {
-		return make_uniq<MmcifWriteGlobalState>();
-	}
-	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override {
-		return make_uniq<LocalSinkState>();
-	}
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override {
 		auto &gstate = input.global_state.Cast<MmcifWriteGlobalState>();
 		chunk.Flatten();
 		auto &row_ids = chunk.data[row_id_index];
 		auto row_data = FlatVector::GetData<int64_t>(row_ids);
-		lock_guard<mutex> l(gstate.lock);
 		for (idx_t r = 0; r < chunk.size(); r++) {
-			gstate.delete_indices.push_back(NumericCast<unsigned int>(row_data[r]));
+			gstate.delete_indices.push_back(NumericCast<idx_t>(row_data[r]));
 		}
 		return SinkResultType::NEED_MORE_INPUT;
 	}
 	SinkCombineResultType Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const override {
 		auto &gstate = input.global_state.Cast<MmcifWriteGlobalState>();
-		lock_guard<mutex> l(gstate.lock);
-		std::vector<unsigned int> indices;
+		std::vector<idx_t> indices;
 		indices.swap(gstate.delete_indices);
 		sort(indices.begin(), indices.end());
 		indices.erase(unique(indices.begin(), indices.end()), indices.end());
 		if (!indices.empty()) {
-			auto store = catalog.GetWriteStore();
-			auto cat = MmcifGetWriteCategory(*store, table_name);
-			store->DeleteRows(*cat, indices);
+			auto &store = catalog.WriteStore(context.client);
+			auto cat = MmcifGetWriteCategory(store, table_name);
+			store.DeleteRows(*cat, indices);
 			gstate.count += indices.size();
 		}
 		return SinkCombineResultType::FINISHED;
 	}
-	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override {
-		return make_uniq<GlobalSourceState>();
-	}
-	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
-	                                 OperatorSourceInput &input) const override {
-		auto &g = sink_state->Cast<MmcifWriteGlobalState>();
-		chunk.SetCardinality(1);
-		chunk.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(g.count)));
-		return SourceResultType::FINISHED;
-	}
 };
 
-class MmcifUpdateOperator : public PhysicalOperator {
+class MmcifUpdateOperator : public MmcifWriteOperator {
 public:
 	MmcifUpdateOperator(PhysicalPlan &physical_plan, vector<LogicalType> types, idx_t estimated_cardinality,
 	                    MmcifCatalog &catalog, string table_name, vector<idx_t> columns, vector<idx_t> expr_indices)
-	    : PhysicalOperator(physical_plan, PhysicalOperatorType::UPDATE, std::move(types), estimated_cardinality),
-	      catalog(catalog), table_name(std::move(table_name)), columns(std::move(columns)),
-	      expr_indices(std::move(expr_indices)) {
+	    : MmcifWriteOperator(physical_plan, PhysicalOperatorType::UPDATE, std::move(types), estimated_cardinality,
+	                         catalog, std::move(table_name)),
+	      columns(std::move(columns)), expr_indices(std::move(expr_indices)) {
 	}
 
-	MmcifCatalog &catalog;
-	string table_name;
 	vector<idx_t> columns;      // physical column index to update
 	vector<idx_t> expr_indices; // chunk index holding the new value
 
-	bool IsSink() const override {
-		return true;
-	}
-	bool ParallelSink() const override {
-		return false;
-	}
-	bool SinkOrderDependent() const override {
-		return true;
-	}
-	bool IsSource() const override {
-		return true;
-	}
-
-	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override {
-		return make_uniq<MmcifWriteGlobalState>();
-	}
-	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override {
-		return make_uniq<LocalSinkState>();
-	}
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override {
 		auto &gstate = input.global_state.Cast<MmcifWriteGlobalState>();
-		auto store = catalog.GetWriteStore();
-		auto cat = MmcifGetWriteCategory(*store, table_name);
-		auto col_names = cat->columns;
+		auto &store = catalog.WriteStore(context.client);
+		auto cat = MmcifGetWriteCategory(store, table_name);
 		chunk.Flatten();
 		auto &row_ids = chunk.data[chunk.ColumnCount() - 1];
 		auto row_data = FlatVector::GetData<int64_t>(row_ids);
-		lock_guard<mutex> l(gstate.lock);
 		for (idx_t r = 0; r < chunk.size(); r++) {
 			for (idx_t i = 0; i < columns.size(); i++) {
-				store->UpdateCell(*cat, NumericCast<idx_t>(row_data[r]), col_names[columns[i]],
-				                  MmcifCellToString(chunk.data[expr_indices[i]], r));
+				store.UpdateCell(*cat, NumericCast<idx_t>(row_data[r]), columns[i],
+				                 MmcifCellToString(chunk.data[expr_indices[i]], r, *cat, columns[i]));
 			}
 		}
 		gstate.count += chunk.size();
 		return SinkResultType::NEED_MORE_INPUT;
-	}
-	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override {
-		return make_uniq<GlobalSourceState>();
-	}
-	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
-	                                 OperatorSourceInput &input) const override {
-		auto &g = sink_state->Cast<MmcifWriteGlobalState>();
-		chunk.SetCardinality(1);
-		chunk.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(g.count)));
-		return SourceResultType::FINISHED;
 	}
 };
 
@@ -269,9 +218,8 @@ public:
 // ---------------------------------------------------------------------------
 
 MmcifTableEntry::MmcifTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info,
-                                 string file_name_p, string table_name_p, MmcifCatalog *catalog_p)
-    : TableCatalogEntry(catalog, schema, info), file_name(std::move(file_name_p)), table_name(std::move(table_name_p)),
-      catalog(catalog_p), columns(std::move(info.columns)) {
+                                 string table_name_p, MmcifCatalog *catalog_p)
+    : TableCatalogEntry(catalog, schema, info), table_name(std::move(table_name_p)), catalog(catalog_p), columns(std::move(info.columns)) {
 }
 
 const ColumnList &MmcifTableEntry::GetColumns() const {
@@ -280,39 +228,28 @@ const ColumnList &MmcifTableEntry::GetColumns() const {
 
 unique_ptr<BaseStatistics> MmcifTableEntry::GetStatistics(ClientContext &context, column_t column_id) {
 	// Real min/max stats require a full category scan, which we deliberately
-	// avoid to keep LIMIT/schema queries cheap. Stats are skipped; the planner
-	// still gets exact cardinality from GetStorageInfo (recommendation 7).
+	// avoid to keep LIMIT/schema queries cheap. Column stats are skipped; the
+	// shared scan callback uses known row counts or advisory estimates.
 	return nullptr;
 }
 
 TableFunction MmcifTableEntry::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
 	auto result = make_uniq<MmcifBindData>();
-	result->file_name = file_name;
-	result->table_name = table_name;
 	result->table_entry = this;
 
-	if (catalog->IsWriteMode()) {
-		// Write mode: materialized store rows (DML mutates the persistent store).
-		auto store = catalog->GetWriteStore();
+	if (catalog->write_mode) {
+		// Write mode: the transaction's materialized store rows.
+		auto store = catalog->ReadStore(context);
 		auto cat = MmcifGetWriteCategory(*store, table_name);
-		MmcifLoadRows(cat, *result);
+		result->column_names = cat->columns;
+		result->store = store;
+		result->write_category = cat;
 		for (auto &col : result->column_names) {
 			result->column_types.push_back(DictionaryIndex::Get().LookupType(table_name, col));
 		}
 	} else {
 		// Read-only: shared lazy index, streamed scan. No materialization.
-		auto index = catalog->GetIndex(&context);
-		auto cat = index->FindCategory(table_name);
-		if (!cat || cat->columns.empty()) {
-			throw BinderException("mmcif: category '%s' not present in file '%s'", table_name.c_str(),
-			                      file_name.c_str());
-		}
-		result->index = std::move(index);
-		result->category = cat;
-		result->column_names = cat->columns;
-		for (auto &col : result->column_names) {
-			result->column_types.push_back(DictionaryIndex::Get().LookupType(table_name, col));
-		}
+		MmcifBindIndex(*result, catalog->GetIndex(&context), table_name);
 	}
 
 	bind_data = std::move(result);
@@ -330,14 +267,14 @@ TableFunction MmcifTableEntry::GetScanFunction(ClientContext &context, unique_pt
 
 TableStorageInfo MmcifTableEntry::GetStorageInfo(ClientContext &context) {
 	TableStorageInfo result;
-	result.cardinality = 10000;
-	if (!catalog->IsWriteMode()) {
+	if (catalog->write_mode) {
+		auto cat = catalog->ReadStore(context)->FindCategory(table_name);
+		result.cardinality = cat ? cat->rows.size() : 0;
+	} else {
 		auto index = catalog->GetIndex(&context);
 		auto cat = index->FindCategory(table_name);
-		if (cat) {
-			// Exact cardinality, computed lazily once per category (cached).
-			result.cardinality = index->GetRowCount(*cat);
-		}
+		// Exact cardinality, computed lazily once per category (cached).
+		result.cardinality = cat ? index->GetRowCount(*cat) : 0;
 	}
 	return result;
 }
@@ -346,9 +283,8 @@ TableStorageInfo MmcifTableEntry::GetStorageInfo(ClientContext &context) {
 // MmcifSchemaEntry
 // ---------------------------------------------------------------------------
 
-MmcifSchemaEntry::MmcifSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, string file_name_p,
-                                   MmcifCatalog *catalog_p)
-    : SchemaCatalogEntry(catalog, info), file_name(std::move(file_name_p)), catalog(catalog_p) {
+MmcifSchemaEntry::MmcifSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, MmcifCatalog *catalog_p)
+    : SchemaCatalogEntry(catalog, info), catalog(catalog_p) {
 }
 
 optional_ptr<CatalogEntry> MmcifSchemaEntry::CreateTable(CatalogTransaction transaction, BoundCreateTableInfo &info) {
@@ -391,7 +327,17 @@ void MmcifSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	throw BinderException("mmcif databases are read-only - cannot ALTER");
 }
 
+static ColumnDefinition MmcifColumnDefinition(DictionaryIndex &dictionary, const string &table_name,
+                                              const string &column_name) {
+	ColumnDefinition result(Identifier(column_name), dictionary.LookupType(table_name, column_name));
+	result.SetComment(Value(dictionary.GetItemUrl(table_name, column_name)));
+	return result;
+}
+
 MmcifTableEntry &MmcifSchemaEntry::GetTableEntry(CatalogTransaction transaction, const string &entry_name) {
+	// Parallel duckdb_tables/duckdb_columns scans can populate this cache
+	// concurrently. Protect lookup and insertion so entries stay unique/alive.
+	lock_guard<mutex> guard(tables_lock);
 	// Cache: reuse an existing entry instead of replacing it. Scans keep a raw
 	// pointer to the returned MmcifTableEntry in their bind data; replacing the
 	// map entry would free that object while still referenced (e.g. a DELETE
@@ -401,27 +347,18 @@ MmcifTableEntry &MmcifSchemaEntry::GetTableEntry(CatalogTransaction transaction,
 	if (existing != tables.end()) {
 		return *existing->second;
 	}
-	auto &catalog = ParentCatalog();
+	auto *columns = this->catalog->FindColumns(transaction.context, entry_name);
+	if (!columns) {
+		throw BinderException("mmcif: category '%s' not present in file '%s'", entry_name.c_str(),
+		                      this->catalog->path.c_str());
+	}
 	CreateTableInfo info(*this, Identifier(entry_name));
 	auto &dict = DictionaryIndex::Get();
-	if (this->catalog->IsWriteMode()) {
-		auto store = this->catalog->GetWriteStore();
-		auto cat = MmcifGetWriteCategory(*store, entry_name);
-		for (auto &col : cat->columns) {
-			info.columns.AddColumn(ColumnDefinition(Identifier(col), dict.LookupType(entry_name, col)));
-		}
-	} else {
-		auto index = this->catalog->GetIndex(transaction.context);
-		auto cat = index->FindCategory(entry_name);
-		if (!cat) {
-			throw BinderException("mmcif: category '%s' not present in file '%s'", entry_name.c_str(),
-			                      file_name.c_str());
-		}
-		for (auto &col : cat->columns) {
-			info.columns.AddColumn(ColumnDefinition(Identifier(col), dict.LookupType(entry_name, col)));
-		}
+	info.comment = Value(dict.GetCategoryUrl(entry_name));
+	for (auto &col : *columns) {
+		info.columns.AddColumn(MmcifColumnDefinition(dict, entry_name, col));
 	}
-	auto entry = make_uniq<MmcifTableEntry>(catalog, *this, info, file_name, entry_name, this->catalog);
+	auto entry = make_uniq<MmcifTableEntry>(ParentCatalog(), *this, info, entry_name, this->catalog);
 	auto *result = entry.get();
 	tables[entry_name] = std::move(entry);
 	return *result;
@@ -432,13 +369,7 @@ void MmcifSchemaEntry::Scan(ClientContext &context, CatalogType type,
 	if (type != CatalogType::TABLE_ENTRY) {
 		return; // mmcif exposes only tables
 	}
-	vector<string> categories;
-	if (catalog->IsWriteMode()) {
-		categories = catalog->GetWriteStore()->GetCategoryNames();
-	} else {
-		auto index = catalog->GetIndex(&context);
-		index->GetCategoryNames(categories);
-	}
+	auto categories = catalog->GetIndex(&context)->GetCategoryNames();
 	auto transaction = GetCatalogTransaction(context);
 	for (auto &category : categories) {
 		callback(GetTableEntry(transaction, category));
@@ -458,14 +389,7 @@ optional_ptr<CatalogEntry> MmcifSchemaEntry::LookupEntry(CatalogTransaction tran
 		return nullptr;
 	}
 	auto entry_name = lookup_info.GetEntryName();
-	if (catalog->IsWriteMode()) {
-		if (catalog->GetWriteStore()->FindCategory(entry_name) == nullptr) {
-			return nullptr;
-		}
-		return &GetTableEntry(transaction, entry_name);
-	}
-	auto index = catalog->GetIndex(transaction.context);
-	if (!index->FindCategory(entry_name)) {
+	if (!catalog->FindColumns(transaction.context, entry_name)) {
 		return nullptr;
 	}
 	return &GetTableEntry(transaction, entry_name);
@@ -475,53 +399,54 @@ optional_ptr<CatalogEntry> MmcifSchemaEntry::LookupEntry(CatalogTransaction tran
 // MmcifCatalog
 // ---------------------------------------------------------------------------
 
-MmcifCatalog::MmcifCatalog(AttachedDatabase &db_p, string path_p, bool write_mode_p)
-    : Catalog(db_p), path(std::move(path_p)), write_mode(write_mode_p) {
-	if (write_mode) {
-		write_store = MmcifFile::LoadWriteStore(path, nullptr);
+MmcifCatalog::MmcifCatalog(AttachedDatabase &db_p, string path_p, bool write_mode_p, ClientContext &context,
+                           unique_ptr<string> data_block_p)
+    : Catalog(db_p), path(std::move(path_p)), data_block(std::move(data_block_p)), write_mode(write_mode_p) {
+	if (write_mode || data_block) {
+		index = MmcifIndex::Load(path, &context, data_block.get());
+		if (write_mode) {
+			write_store = index->Materialize();
+		}
 	}
 }
 
-bool MmcifCatalog::IsWriteMode() const {
-	return write_mode;
-}
-
-MmcifWriteStore *MmcifCatalog::GetWriteStore() {
-	return write_store.get();
+const std::vector<string> *MmcifCatalog::FindColumns(optional_ptr<ClientContext> context, const string &table_name) {
+	auto cat = GetIndex(context)->FindCategory(table_name);
+	return cat ? &cat->columns : nullptr;
 }
 
 shared_ptr<MmcifIndex> MmcifCatalog::GetIndex(optional_ptr<ClientContext> context) {
-	if (write_mode) {
-		return nullptr;
-	}
 	lock_guard<mutex> l(index_lock);
 	if (!index) {
-		index = MmcifIndex::Load(path, context);
+		index = MmcifIndex::Load(path, context, data_block.get());
 	}
 	return index;
 }
 
-void MmcifCatalog::ReloadFromDisk() {
-	if (!write_mode) {
-		return;
-	}
-	write_store = MmcifFile::LoadWriteStore(path, nullptr);
+shared_ptr<MmcifWriteStore> MmcifCatalog::ReadStore(ClientContext &context) {
+	return Transaction::Get(context, *this).Cast<MmcifTransaction>().store;
 }
 
-void MmcifCatalog::Persist(ClientContext &context) {
-	if (!write_mode || !write_store) {
-		return;
+MmcifWriteStore &MmcifCatalog::WriteStore(ClientContext &context) {
+	auto &transaction = Transaction::Get(context, *this).Cast<MmcifTransaction>();
+	if (transaction.store == transaction.snapshot) {
+		{
+			lock_guard<mutex> l(write_lock);
+			if (write_store != transaction.snapshot) {
+				throw TransactionException("mmcif: write-write conflict on '%s' - another transaction committed first",
+				                           path);
+			}
+		}
+		// ponytail: copies the whole store once per writing transaction (same O(file)
+		// as the write-back); copy only touched categories if this shows in profiles.
+		transaction.store = make_shared_ptr<MmcifWriteStore>(*transaction.snapshot);
 	}
-	MmcifFile::Persist(*write_store, path, context);
+	return *transaction.store;
 }
 
 void MmcifCatalog::Initialize(bool load_builtin) {
 	CreateSchemaInfo info;
-	main_schema = make_uniq<MmcifSchemaEntry>(*this, info, path, this);
-}
-
-void MmcifCatalog::OnDetach(ClientContext &context) {
-	Persist(context);
+	main_schema = make_uniq<MmcifSchemaEntry>(*this, info, this);
 }
 
 string MmcifCatalog::GetCatalogType() {
@@ -626,7 +551,10 @@ DatabaseSize MmcifCatalog::GetDatabaseSize(ClientContext &context) {
 }
 
 bool MmcifCatalog::InMemory() {
-	return true;
+	// The catalog metadata is materialized in memory, but the database itself is
+	// backed by the attached mmCIF file. DuckDB uses this return value to decide
+	// whether duckdb_databases().path should be NULL.
+	return false;
 }
 
 string MmcifCatalog::GetDBPath() {
@@ -646,7 +574,12 @@ MmcifTransactionManager::MmcifTransactionManager(AttachedDatabase &db, MmcifCata
 }
 
 Transaction &MmcifTransactionManager::StartTransaction(ClientContext &context) {
-	auto transaction = make_uniq<Transaction>(*this, context);
+	shared_ptr<MmcifWriteStore> snapshot;
+	{
+		lock_guard<mutex> l(catalog.write_lock);
+		snapshot = catalog.write_store;
+	}
+	auto transaction = make_uniq<MmcifTransaction>(*this, context, std::move(snapshot));
 	auto &result = *transaction;
 	lock_guard<mutex> l(lock);
 	transactions[result] = std::move(transaction);
@@ -654,32 +587,47 @@ Transaction &MmcifTransactionManager::StartTransaction(ClientContext &context) {
 }
 
 ErrorData MmcifTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction) {
-	// D5: write the mutated in-memory write store back to the attached .cif on COMMIT.
-	catalog.Persist(context);
+	auto &mmcif_transaction = transaction.Cast<MmcifTransaction>();
+	ErrorData error;
+	auto &store = mmcif_transaction.store;
+	// Read-only / no-op transactions never rewrite the file.
+	if (store != mmcif_transaction.snapshot && store->IsDirty()) {
+		lock_guard<mutex> l(catalog.write_lock);
+		try {
+			if (catalog.write_store != mmcif_transaction.snapshot) {
+				throw TransactionException("mmcif: write-write conflict on '%s' - another transaction committed first",
+				                           catalog.path);
+			}
+			MmcifFile::Persist(*store, catalog.path, context);
+			store->ClearDirty();
+			catalog.write_store = store;
+		} catch (std::exception &ex) {
+			error = ErrorData(ex);
+		}
+	}
 	lock_guard<mutex> l(lock);
 	transactions.erase(transaction);
-	return ErrorData();
+	return error;
 }
 
 void MmcifTransactionManager::RollbackTransaction(Transaction &transaction) {
-	// D6: ROLLBACK discards in-memory mutations by re-parsing from disk.
-	catalog.ReloadFromDisk();
+	// The private store dies with the transaction; the committed store is untouched.
 	lock_guard<mutex> l(lock);
 	transactions.erase(transaction);
 }
 
 void MmcifTransactionManager::Checkpoint(ClientContext &context, bool force) {
-	if (!catalog.IsWriteMode()) {
+	if (!catalog.write_mode) {
 		throw NotImplementedException("Cannot CHECKPOINT a read-only mmcif database");
 	}
-	catalog.Persist(context);
+	// Nothing to do: COMMIT already wrote every committed change to disk.
 }
 
 // ---------------------------------------------------------------------------
 // Attach + storage-extension registration
 // ---------------------------------------------------------------------------
 
-// D1: enter write mode only when the user explicitly passes a read-write access
+// Enter write mode only when the user explicitly passes a read-write access
 // key (READ_WRITE TRUE). Read-only is the default even though DuckDB core's
 // own default access_mode is READ_WRITE. info.options is the raw pre-consumption
 // map, so the extension can see the explicit keys DuckDB core already consumed.
@@ -709,6 +657,21 @@ static bool MmcifAttachWriteMode(const AttachInfo &info) {
 static unique_ptr<Catalog> MmcifAttach(optional_ptr<StorageExtensionInfo> storage_info, ClientContext &context,
                                        AttachedDatabase &db, const string &name, AttachInfo &info,
                                        AttachOptions &attach_options) {
+	string glob_path = info.path;
+	if (MmcifFile::IsRemotePath(info.path)) {
+		// Only the URI path can be a glob: query strings, fragments and
+		// bracketed IPv6 hosts are part of an exact remote address.
+		auto path_start = info.path.find_first_of("/?#", info.path.find("://") + 3);
+		glob_path = path_start != string::npos && info.path[path_start] == '/' ? info.path.substr(path_start) : "";
+		glob_path = glob_path.substr(0, glob_path.find_first_of("?#"));
+	} else if (FileSystem::HasGlob(info.path) && FileSystem::GetFileSystem(context).FileExists(info.path)) {
+		// An existing literal filename may contain glob metacharacters.
+		glob_path.clear();
+	}
+	if (FileSystem::HasGlob(glob_path)) {
+		throw InvalidInputException(
+		    "mmcif: ATTACH requires one exact file path; use mmcif_scan for globs or file lists");
+	}
 	bool write_mode = MmcifAttachWriteMode(info);
 	// Remote files (http/https/s3/...) are served through a streaming file
 	// system and cannot be rewritten in place, so they are always read-only.
@@ -719,10 +682,20 @@ static unique_ptr<Catalog> MmcifAttach(optional_ptr<StorageExtensionInfo> storag
 	// Pipes (e.g. /dev/stdin) are one-shot streams: there is nothing to
 	// write back to on COMMIT, so write mode is rejected instead of
 	// silently losing mutations.
-	if (write_mode && !MmcifFile::IsRemotePath(info.path) && FileSystem::GetFileSystem(context).IsPipe(info.path)) {
+	if (write_mode && FileSystem::GetFileSystem(context).IsPipe(info.path)) {
 		throw InvalidInputException("mmcif: '%s' cannot be attached with READ_WRITE - pipes are read-only", info.path);
 	}
-	return make_uniq<MmcifCatalog>(db, info.path, write_mode);
+	unique_ptr<string> data_block;
+	for (auto &entry : attach_options.options) {
+		if (StringUtil::CIEquals(entry.first, "data_block")) {
+			if (entry.second.IsNull() || entry.second.type() != LogicalType::VARCHAR) {
+				throw InvalidInputException("mmcif: DATA_BLOCK must be a non-NULL string");
+			}
+			data_block = make_uniq<string>(entry.second.GetValue<string>());
+		}
+	}
+	attach_options.options.erase("data_block");
+	return make_uniq<MmcifCatalog>(db, info.path, write_mode, context, std::move(data_block));
 }
 
 static unique_ptr<TransactionManager> MmcifCreateTransactionManager(optional_ptr<StorageExtensionInfo> storage_info,

@@ -1,0 +1,88 @@
+# name: test/sql/mmcif_modelcif.test
+# description: Real AlphaFold DB data uses ModelCIF types, documentation and relationships
+# group: [sql]
+
+require mmcif
+
+statement ok
+SET threads=6;
+
+# Repeated fresh catalogs exercise concurrent entry creation in both scans.
+loop repeat 0 10
+
+statement ok
+ATTACH '__WORKING_DIRECTORY__/test/data/AF-A0A009IHW8-F1-model_v6.cif.gz' AS af (TYPE mmcif);
+
+# The functions expose the same tables and columns as the attached catalog.
+query I
+SELECT count(*) FROM ((SELECT table_name FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/AF-A0A009IHW8-F1-model_v6.cif.gz') EXCEPT SELECT table_name FROM duckdb_tables() WHERE database_name='af') UNION ALL (SELECT table_name FROM duckdb_tables() WHERE database_name='af' EXCEPT SELECT table_name FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/AF-A0A009IHW8-F1-model_v6.cif.gz')));
+----
+0
+
+query I
+SELECT count(*) FROM ((SELECT table_name, column_name, data_type, comment FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/AF-A0A009IHW8-F1-model_v6.cif.gz') EXCEPT SELECT table_name, column_name, data_type, comment FROM duckdb_columns() WHERE database_name='af') UNION ALL (SELECT table_name, column_name, data_type, comment FROM duckdb_columns() WHERE database_name='af' EXCEPT SELECT table_name, column_name, data_type, comment FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/AF-A0A009IHW8-F1-model_v6.cif.gz')));
+----
+0
+
+statement ok
+DETACH af;
+
+endloop
+
+statement ok
+ATTACH '__WORKING_DIRECTORY__/test/data/AF-A0A009IHW8-F1-model_v6.cif.gz' AS af (TYPE mmcif);
+
+# The functions expose the same tables and columns as the attached catalog.
+query I
+SELECT count(*) FROM ((SELECT table_name FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/AF-A0A009IHW8-F1-model_v6.cif.gz') EXCEPT SELECT table_name FROM duckdb_tables() WHERE database_name='af') UNION ALL (SELECT table_name FROM duckdb_tables() WHERE database_name='af' EXCEPT SELECT table_name FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/AF-A0A009IHW8-F1-model_v6.cif.gz')));
+----
+0
+
+query I
+SELECT count(*) FROM ((SELECT table_name, column_name, data_type, comment FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/AF-A0A009IHW8-F1-model_v6.cif.gz') EXCEPT SELECT table_name, column_name, data_type, comment FROM duckdb_columns() WHERE database_name='af') UNION ALL (SELECT table_name, column_name, data_type, comment FROM duckdb_columns() WHERE database_name='af' EXCEPT SELECT table_name, column_name, data_type, comment FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/AF-A0A009IHW8-F1-model_v6.cif.gz')));
+----
+0
+
+query TT
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name='af' AND table_name='ma_qa_metric_local' AND column_name IN ('metric_value', 'model_id') ORDER BY column_name;
+----
+metric_value	DOUBLE
+model_id	BIGINT
+
+# Shared base categories retain base documentation; MA categories get ModelCIF links.
+query TT
+SELECT table_name, comment FROM duckdb_tables() WHERE database_name='af' AND table_name IN ('atom_site', 'ma_qa_metric_local') ORDER BY table_name;
+----
+atom_site	https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Categories/atom_site.html
+ma_qa_metric_local	https://mmcif.wwpdb.org/dictionaries/mmcif_ma.dic/Categories/ma_qa_metric_local.html
+
+query T
+SELECT comment FROM mmcif_columns('__WORKING_DIRECTORY__/test/data/AF-A0A009IHW8-F1-model_v6.cif.gz') WHERE table_name='ma_qa_metric_local' AND column_name='metric_value';
+----
+https://mmcif.wwpdb.org/dictionaries/mmcif_ma.dic/Items/_ma_qa_metric_local.metric_value.html
+
+query TTTT
+SELECT parent_table, parent_column, child_table, child_column FROM mmcif_relationships('__WORKING_DIRECTORY__/test/data/AF-A0A009IHW8-F1-model_v6.cif.gz') WHERE child_table='ma_qa_metric_global' ORDER BY ALL;
+----
+ma_model_list	ordinal_id	ma_qa_metric_global	model_id
+ma_qa_metric	id	ma_qa_metric_global	metric_id
+
+query R
+SELECT metric_value FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/AF-A0A009IHW8-F1-model_v6.cif.gz', 'ma_qa_metric_global');
+----
+84.99
+
+# Numeric local metrics can be joined to metric definitions and model identifiers.
+query I
+SELECT count(*) FROM af.ma_qa_metric_local q JOIN af.ma_qa_metric m ON q.metric_id=m.id JOIN af.ma_model_list l ON q.model_id=l.ordinal_id WHERE m.name='pLDDT' AND q.metric_value BETWEEN 0 AND 100;
+----
+269
+
+statement ok
+COPY (SELECT * FROM af.ma_qa_metric_local) TO '__TEST_DIR__/af_local.csv' (FORMAT CSV);
+
+statement ok
+COPY (SELECT * FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/AF-A0A009IHW8-F1-model_v6.cif.gz', 'ma_template_trans_matrix')) TO '__TEST_DIR__/af_templates.csv' (FORMAT CSV);
+
+statement ok
+DETACH af;

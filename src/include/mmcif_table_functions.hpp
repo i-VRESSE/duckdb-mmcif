@@ -1,14 +1,14 @@
 // Per-category scan + metadata table functions module.
 //
-// MmcifBindData carries the parsed rows + dictionary types. It is used both as
-// the global mmcif_scan(file, table) table function (bind reads the two
-// VARCHAR args) and as the attached-table scan (GetScanFunction pre-fills
-// bind_data, so bind is never called).
+// MmcifBindData carries dictionary types and shared read indexes or a write
+// store. Global scans bind paths/globs/lists; attached-table scans pre-fill
+// bind_data in GetScanFunction, so their bind callback is never called.
 
 #pragma once
 
 #include "duckdb.hpp"
 #include "duckdb/common/types.hpp"
+#include "duckdb/common/constants.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 
@@ -17,30 +17,47 @@
 #include <vector>
 
 #include "mmcif_index.hpp"
+#include "mmcif_write_store.hpp"
 
 namespace duckdb {
 
 class ExtensionLoader;
 
+struct MmcifScanFile {
+	string path;
+	shared_ptr<MmcifIndex> index;
+	MmcifCategory *category = nullptr;
+	vector<idx_t> local_to_union;
+};
+
 struct MmcifBindData : public FunctionData {
-	string file_name;
+	// Multi-file/global read path: file-local columns map to the union schema.
+	vector<MmcifScanFile> files;
+	// Dictionary mode binds only paths and a fixed schema, never file contents.
+	bool dictionary_schema = false;
+	vector<string> paths;
 	string table_name;
+	bool has_data_block = false;
+	string data_block;
+	idx_t filename_column = DConstants::INVALID_INDEX;
 	std::vector<string> column_names;
 	std::vector<LogicalType> column_types;
-	// Read-only path (recommendation 3/5): a shared lazy index + category. Rows
+	// Read-only path: a shared lazy index + category. Rows
 	// are streamed from the byte cursor in MmcifScan; nothing is materialized at
 	// bind, so LIMIT 10 never copies 2.44M rows.
 	shared_ptr<MmcifIndex> index;
 	MmcifCategory *category = nullptr;
-	// Write-mode (legacy) path: materialized RCSB rows.
-	std::vector<std::vector<string>> rows;
+	// Write-mode path: the catalog's store and the scanned category. The store
+	// is shared, not copied; the scan reads the rows present when it starts.
+	shared_ptr<MmcifWriteStore> store;
+	MmcifWriteCategory *write_category = nullptr;
 	optional_ptr<TableCatalogEntry> table_entry; // set only for attached-table scans
 
 	unique_ptr<FunctionData> Copy() const override;
 	bool Equals(const FunctionData &other) const override;
 
 	static bool IsNullCell(const string &v) {
-		// A cell is NULL when it is empty, ".", or "?" (the RCSB stored forms).
+		// A cell is NULL when it is empty, ".", or "?" (the stored null forms).
 		return v.empty() || v == "." || v == "?";
 	}
 };
@@ -49,7 +66,16 @@ struct MmcifBindData : public FunctionData {
 // the attached-table scan.
 TableFunction MmcifScanFunction();
 
-// Registers mmcif_scan, mmcif_tables, and mmcif_relationships on the loader.
+// Read-only bind: point result at the index category and set its column
+// names and dictionary types. Throws if the category is absent.
+void MmcifBindIndex(MmcifBindData &result, shared_ptr<MmcifIndex> index, const string &table_name);
+
+// Union matching categories, retaining indexes and concrete source paths.
+void MmcifBindFiles(MmcifBindData &result, const vector<string> &paths, const vector<shared_ptr<MmcifIndex>> &indexes,
+                    const string &table_name);
+vector<string> MmcifExpandFiles(ClientContext &context, const Value &input);
+
+// Registers mmcif_scan, mmcif_tables, mmcif_columns, and mmcif_relationships on the loader.
 void MmcifRegisterTableFunctions(ExtensionLoader &loader);
 
 } // namespace duckdb

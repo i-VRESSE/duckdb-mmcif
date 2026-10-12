@@ -16,3 +16,9 @@ include extension-ci-tools/makefiles/duckdb_extension.Makefile
 test_cpp: release
 	cmake --build build/release --target mmcif_catch_tests
 	./build/release/test/cpp/mmcif_catch_tests
+
+.PHONY: test_dictionary
+
+# Offline checks for complete, reproducible schema generation.
+test_dictionary:
+	python3 -m unittest discover -s test/python

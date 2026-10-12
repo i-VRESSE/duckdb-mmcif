@@ -6,7 +6,7 @@
 
 Query [mmCIF](https://mmcif.wwpdb.org/) (PDBx) structural-biology files with SQL, right inside [DuckDB](https://duckdb.org/).
 
-`ATTACH` a `.cif` file and every mmCIF category shows up as a normal DuckDB table — with column types inferred from the PDBx/mmCIF dictionary. No ETL, no schema design, no Python parsing loop: just SQL over macromolecular structure data.
+`ATTACH` a `.cif` file and every mmCIF category shows up as a normal DuckDB table — with column types inferred from the bundled PDBx/mmCIF dictionary and its supported extensions. No ETL, no schema design, no Python parsing loop: just SQL over macromolecular structure data.
 
 ## What is mmCIF?
 
@@ -16,8 +16,9 @@ The format is powerful but awkward to analyze: files are large, syntax is quirky
 
 ## Why use it?
 
-- **Zero-pipeline analysis** — once the extension is [built](CONTRIBUTING.md#building) and loaded, just attach a file and query it. (The extension is not yet on the [community extensions repository](https://duckdb.org/community_extensions/list_of_extensions.html), so it is built from source.)
+- **Zero-pipeline analysis** — install as a [community extension](https://duckdb.org/community_extensions/extensions/mmcif) and start querying immediately.
 - **Typed out of the box** — column types come from the mmCIF dictionary type index, so `Cartn_x` is a `DOUBLE` and `label_seq_id` is a `BIGINT`. `.` and `?` become `NULL`.
+- **Dictionary extensions included** — [IHMCIF, flrCIF, 3DEM and ModelCIF](docs/dictionary-extensions.md) support integrative models, fluorescence/FRET, electron microscopy and AlphaFold DB models automatically, with types, documentation links and relationships.
 - **Gzip support** — RCSB-style `*.cif.gz` files (for example `https://files.rcsb.org/download/1AMB.cif.gz`) are auto-detected and decompressed.
 - **Relationships as data** — discover how categories reference each other programmatically with `mmcif_relationships()`, instead of browsing the [mmcif dictionary website](https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Categories/atom_site.html).
 - **Fast** — custom cif parser/writer inspired by the [RCSB mmcif ccp libraries](https://github.com/rcsb/cpp-common), with DuckDB's vectorized execution on top.
@@ -29,11 +30,13 @@ The format is powerful but awkward to analyze: files are large, syntax is quirky
 Load the extension into a DuckDB shell started with unsigned extensions allowed:
 
 ```sh
-duckdb -unsigned
+duckdb
 ```
+(Extension is available since v1.5.5, upgrade DuckDB if necessary.)
 
 ```sql
-LOAD 'mmcif.duckdb_extension';
+INSTALL mmcif FROM community;
+LOAD mmcif;
 
 ATTACH '1amb_updated.cif' AS mmcifdb (TYPE mmcif);
 USE mmcifdb;
@@ -53,41 +56,95 @@ FROM atom_site
 WHERE type_symbol = 'ZN';
 ```
 
-Column types are inferred from the mmCIF dictionary (`dict/mmcif_pdbx_v50_type_index.tsv.gz`):
+Column types are inferred from the combined dictionary (`dict/mmcif_type_index.tsv.gz`):
 
 ```sql
 DESCRIBE atom_site;
 -- Cartn_x DOUBLE, label_seq_id BIGINT, type_symbol VARCHAR, ...
 ```
 
+## Dictionary extensions
+
+The extension bundles the current PDBx/mmCIF v5 dictionary together with
+**IHMCIF**, **flrCIF**, **3DEM** and **ModelCIF**. All are available by default:
+no dictionary selection or downloads are needed when opening a file.
+
+See [dictionary extensions](docs/dictionary-extensions.md) for usage, dictionary
+coverage and ER diagrams from real archive examples.
+
 ## Table functions
 
-Three global table functions work without attaching anything:
+Query a file without attaching it:
 
 ```sql
--- one row per (category, column) with its inferred type
+-- List categories and their dictionary documentation
 SELECT * FROM mmcif_tables('1amb_updated.cif');
 
--- one row per parent/child relationship, each side a (table, column) pair
+-- List columns and their types
+SELECT * FROM mmcif_columns('1amb_updated.cif');
+
+-- Find relationships between categories
 SELECT * FROM mmcif_relationships('1amb_updated.cif');
 
--- scan a single category directly
+-- List data blocks
+SELECT * FROM mmcif_blocks('1amb_updated.cif');
+
+-- Read a category
 SELECT * FROM mmcif_scan('1amb_updated.cif', 'atom_site');
 ```
 
-Piping a file through stdin works too (like `read_csv`), for all three table functions:
+All five functions also accept `/dev/stdin`:
 
 ```sh
 cat 1amb_updated.cif | duckdb -c "SELECT * FROM mmcif_scan('/dev/stdin', 'atom_site')"
 ```
 
-Entity/relationship diagram of the categories in `test/data/1amb_updated.cif`, as returned by `mmcif_relationships()`:
+Relationships in `test/data/1amb_updated.cif`:
 
 <!-- Generated with:
     python3 scripts/mmcif_relationships_diagram.py test/data/1amb_updated.cif -f dot \
-      | dot -Tsvg -o rel.svg
+      | dot -Tsvg -o docs/diagrams/pdbx.svg
 -->
-![mmcif relationships diagram](rel.svg)
+![mmcif relationships diagram](docs/diagrams/pdbx.svg)
+
+## Multiple files
+
+Read the same category from a glob or a list of paths/globs. Plain CIF and gzip
+files can be mixed:
+
+```sql
+SELECT filename, id, Cartn_x
+FROM mmcif_scan('structures/**/*.cif.gz', 'atom_site');
+
+SELECT * FROM mmcif_scan(['first.cif', 'more/*.cif.gz'], 'atom_site');
+```
+
+When the input matches multiple files, `filename` identifies each row's source.
+It is only added when more than one file matches. Missing values become `NULL`;
+files without the requested category contribute no rows.
+
+By default, scans include all dictionary columns. For custom categories/items,
+or to include only columns present in your files, use `column_source := 'files'`:
+
+```sql
+SELECT * FROM mmcif_scan('structures/*.cif', 'my_category',
+                        column_source := 'files');
+```
+
+Each scan combines rows from the same category across all matched files;
+no join or aggregation is needed.
+
+For long scans, enable the progress bar and choose how many threads to use:
+
+```sql
+SET enable_progress_bar = true;
+SET threads = 6; -- Reduce this to use less memory
+SELECT count(*) FROM mmcif_scan('structures/**/*.cif.gz', 'atom_site');
+```
+
+`ATTACH` and the metadata functions take one file; use `mmcif_scan` for multiple
+files. To select a specific data block in every file, add `data_block := 'name'`
+(see [Multiple data blocks](#multiple-data-blocks)).
 
 ## Ligands
 
@@ -99,6 +156,28 @@ USE liganddb;
 
 SELECT id, name, type, formula FROM chem_comp;
 -- ATP, "ADENOSINE-5'-TRIPHOSPHATE", NON-POLYMER, "C10 H16 N5 O13 P3"
+```
+
+## Multiple data blocks
+
+A file can contain multiple blocks, each beginning with `data_name`, such as
+the wwPDB [Chemical Component Dictionary (`components.cif.gz`)](https://files.wwpdb.org/pub/pdb/data/monomers/components.cif.gz),
+which has a separate block for each chemical component. List their names:
+
+```sql
+SELECT * FROM mmcif_blocks('components.cif.gz'); -- block_name (without data_)
+```
+
+Existing functions and `ATTACH` use the first block by default. Select another
+block by name (case-insensitive), without the `data_` prefix. For example,
+select `data_ATP` from the Chemical Component Dictionary:
+
+```sql
+SELECT * FROM mmcif_scan('components.cif.gz', 'chem_comp', data_block := 'ATP');
+SELECT * FROM mmcif_tables('components.cif.gz', data_block := 'ATP');
+SELECT * FROM mmcif_columns('components.cif.gz', data_block := 'ATP');
+SELECT * FROM mmcif_relationships('components.cif.gz', data_block := 'ATP');
+ATTACH 'components.cif.gz' AS atpdb (TYPE mmcif, DATA_BLOCK 'ATP');
 ```
 
 ## Read-only by default
@@ -135,6 +214,7 @@ Ready-to-run example scripts live in [`docs/examples/`](docs/examples/):
 - [`keep_chain_A.sql`](docs/examples/keep_chain_A.sql) — filters an mmCIF file down to a single auth chain (chain A of `3PLZ`, downloaded from https://files.rcsb.org/download/3PLZ.cif.gz), deleting rows in every dependent category that do not belong to that chain. Uses `mmcif_relationships()` to work out which tables reference chains.
 - [`keep_chain_D2A.sql`](docs/examples/keep_chain_D2A.sql) — keeps only chain D of `3PLZ` and renames it to chain A (in both the auth and label chain-id namespaces), producing a plain chain-A file; a copy `3PLZ_D2A.cif.gz` is edited so the original is never touched.
 - [`spatial_atoms.sql`](docs/examples/spatial_atoms.sql) — 3D geometry analysis of `atom_site` coordinates with the [spatial extension](https://duckdb.org/docs/stable/core_extensions/spatial/overview.html): binding-pocket residues around the `3PLZ` inhibitor, chain–chain interface contacts, hydration shell, bounding box, rigid-body transforms, and Cα trace export.
+- [`metadata_multiple.sql`](docs/examples/metadata_multiple.sql) — joins category scans by filename to extract resolution and deposition date across a collection.
 - [`metadata.sql`](docs/examples/metadata.sql) — structure metadata as SQL (entry id, resolution, experimental method, software, label/auth chain mapping, residue counts, UniProt accession).
 - [`secondary_structure.sql`](docs/examples/secondary_structure.sql) — helix/sheet residue counts and ratios from `struct_conf` / `struct_sheet_range`.
 - [`confidence_filter.sql`](docs/examples/confidence_filter.sql) — AlphaFold pLDDT (B-iso) confidence counting and write-mode residue filtering.

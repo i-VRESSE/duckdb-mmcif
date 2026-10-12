@@ -1,0 +1,132 @@
+{
+  "documentation_priority": "First defining source wins: current PDBx/mmCIF v5, then IHMCIF, flrCIF, 3DEM, ModelCIF. This preserves base documentation for shared definitions.",
+  "sources": [
+    {
+      "filename": "mmcif_pdbx_v50.dic",
+      "version": "5.417",
+      "url": "https://mmcif.wwpdb.org/dictionaries/ascii/mmcif_pdbx_v50.dic",
+      "documentation_url": "https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic",
+      "sha256": "758c946b80dd4b3e408b8b199a7f8233cfa5726b380baa9c767c5fb6ed81e28e"
+    },
+    {
+      "filename": "mmcif_ihm_ext.dic",
+      "version": "1.28",
+      "url": "https://mmcif.wwpdb.org/dictionaries/ascii/mmcif_ihm_ext.dic",
+      "documentation_url": "https://mmcif.wwpdb.org/dictionaries/mmcif_ihm_ext.dic",
+      "sha256": "9d2d5ba4a1e683b572cb35b473b3d81312912beb9cd62d1a450b3c36c0fb4f55"
+    },
+    {
+      "filename": "mmcif_ihm_flr_ext.dic",
+      "version": "0.03",
+      "url": "https://mmcif.wwpdb.org/dictionaries/ascii/mmcif_ihm_flr_ext.dic",
+      "documentation_url": "https://mmcif.wwpdb.org/dictionaries/mmcif_ihm_flr_ext.dic",
+      "sha256": "92ac155d1225e7c45484d04747744f8d9548f6b5bfc3fbba98cea365db7ffcb2"
+    },
+    {
+      "filename": "mmcif_em.dic",
+      "version": "0.015",
+      "url": "https://mmcif.wwpdb.org/dictionaries/ascii/mmcif_em.dic",
+      "documentation_url": "https://mmcif.wwpdb.org/dictionaries/mmcif_em.dic",
+      "sha256": "c53e127273f68b9f22fb40f370a8fab8204af2eff5ef0c7c8a392292f689158b"
+    },
+    {
+      "filename": "mmcif_ma.dic",
+      "version": "1.4.9",
+      "url": "https://mmcif.wwpdb.org/dictionaries/ascii/mmcif_ma.dic",
+      "documentation_url": "https://mmcif.wwpdb.org/dictionaries/mmcif_ma.dic",
+      "sha256": "aeb205bbf23d459089c694eec004978c78497e5f5d3dd5642120dd0d62e9b844"
+    }
+  ],
+  "type_conflicts": {
+    "_em_vitrification.humidity": {
+      "types": {
+        "mmcif_pdbx_v50.dic": "DOUBLE",
+        "mmcif_em.dic": "VARCHAR",
+        "mmcif_ma.dic": "DOUBLE"
+      },
+      "use": "mmcif_pdbx_v50.dic",
+      "reason": "Preserve the current PDBx/mmCIF v5 definition; the standalone 3DEM dictionary predates it."
+    },
+    "_em_imaging.nominal_defocus_min": {
+      "types": {
+        "mmcif_pdbx_v50.dic": "BIGINT",
+        "mmcif_em.dic": "DOUBLE",
+        "mmcif_ma.dic": "BIGINT"
+      },
+      "use": "mmcif_pdbx_v50.dic",
+      "reason": "Preserve the current PDBx/mmCIF v5 definition; the standalone 3DEM dictionary predates it."
+    },
+    "_em_imaging.nominal_defocus_max": {
+      "types": {
+        "mmcif_pdbx_v50.dic": "BIGINT",
+        "mmcif_em.dic": "DOUBLE",
+        "mmcif_ma.dic": "BIGINT"
+      },
+      "use": "mmcif_pdbx_v50.dic",
+      "reason": "Preserve the current PDBx/mmCIF v5 definition; the standalone 3DEM dictionary predates it."
+    },
+    "_em_single_particle_entity.id": {
+      "types": {
+        "mmcif_pdbx_v50.dic": "BIGINT",
+        "mmcif_em.dic": "VARCHAR",
+        "mmcif_ma.dic": "BIGINT"
+      },
+      "use": "mmcif_pdbx_v50.dic",
+      "reason": "Preserve the current PDBx/mmCIF v5 definition; the standalone 3DEM dictionary predates it."
+    },
+    "_em_map.data_type": {
+      "types": {
+        "mmcif_pdbx_v50.dic": "VARCHAR",
+        "mmcif_em.dic": "BIGINT",
+        "mmcif_ma.dic": "VARCHAR"
+      },
+      "use": "mmcif_pdbx_v50.dic",
+      "reason": "Preserve the current PDBx/mmCIF v5 definition; the standalone 3DEM dictionary predates it."
+    },
+    "_em_map.id": {
+      "types": {
+        "mmcif_pdbx_v50.dic": "BIGINT",
+        "mmcif_em.dic": "VARCHAR",
+        "mmcif_ma.dic": "BIGINT"
+      },
+      "use": "mmcif_pdbx_v50.dic",
+      "reason": "Preserve the current PDBx/mmCIF v5 definition; the standalone 3DEM dictionary predates it."
+    },
+    "_em_map.spacing_x": {
+      "types": {
+        "mmcif_pdbx_v50.dic": "BIGINT",
+        "mmcif_em.dic": "DOUBLE",
+        "mmcif_ma.dic": "BIGINT"
+      },
+      "use": "mmcif_pdbx_v50.dic",
+      "reason": "Preserve the current PDBx/mmCIF v5 definition; the standalone 3DEM dictionary predates it."
+    },
+    "_em_map.spacing_y": {
+      "types": {
+        "mmcif_pdbx_v50.dic": "BIGINT",
+        "mmcif_em.dic": "DOUBLE",
+        "mmcif_ma.dic": "BIGINT"
+      },
+      "use": "mmcif_pdbx_v50.dic",
+      "reason": "Preserve the current PDBx/mmCIF v5 definition; the standalone 3DEM dictionary predates it."
+    },
+    "_em_map.spacing_z": {
+      "types": {
+        "mmcif_pdbx_v50.dic": "BIGINT",
+        "mmcif_em.dic": "DOUBLE",
+        "mmcif_ma.dic": "BIGINT"
+      },
+      "use": "mmcif_pdbx_v50.dic",
+      "reason": "Preserve the current PDBx/mmCIF v5 definition; the standalone 3DEM dictionary predates it."
+    },
+    "_em_fsc_curve.id": {
+      "types": {
+        "mmcif_pdbx_v50.dic": "VARCHAR",
+        "mmcif_em.dic": "BIGINT",
+        "mmcif_ma.dic": "VARCHAR"
+      },
+      "use": "mmcif_pdbx_v50.dic",
+      "reason": "Preserve the current PDBx/mmCIF v5 definition; the standalone 3DEM dictionary predates it."
+    }
+  }
+}

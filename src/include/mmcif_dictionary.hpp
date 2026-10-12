@@ -1,4 +1,4 @@
-// Dictionary type index (issue 03): lazy singleton loaded from the embedded
+// Dictionary type index: lazy singleton loaded from the embedded
 // gzip'd TSV artifacts (dict/*.tsv.gz, embedded at build time). Type keys are
 // "_category.item"; relationships are (parent_item, child_item) pairs where
 // each item is a "_category.item" key carrying both the category (table) and
@@ -22,16 +22,21 @@ public:
 
 	// "_category.item" -> DuckDB type; unknown -> VARCHAR
 	LogicalType LookupType(const string &category, const string &column) const;
+	// Documentation page in the defining bundled dictionary (base or extension).
+	string GetCategoryUrl(const string &category) const;
+	// Documentation page for an item in its defining bundled dictionary.
+	string GetItemUrl(const string &category, const string &column) const;
 
 	const std::vector<std::pair<std::string, std::string>> &GetRelationships() const;
+	// Complete category item names, in stable dictionary-artifact order.
+	const vector<string> *GetColumns(const string &category) const;
 
 private:
 	DictionaryIndex();
 
-	void LoadTypes();
-	void LoadRelationships();
-
 	case_insensitive_map_t<LogicalType> types;
+	case_insensitive_map_t<vector<string>> columns;
+	case_insensitive_map_t<string> documentation;
 	std::vector<std::pair<std::string, std::string>> relationships;
 };
 

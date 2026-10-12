@@ -4,14 +4,25 @@
 name: Main Extension Distribution Pipeline
 on:
   push:
+    branches:
+      - main
   pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' && github.sha || '' }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  dictionary-generator-check:
+    name: Check dictionary generator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s test/python
+
   duckdb-stable-build:
     name: Build extension binaries (stable)
     if: false # This branch targets DuckDB v2.0-cyanoptera and is incompatible with the latest stable release.
@@ -31,9 +42,9 @@ jobs:
 
   code-quality-check:
     name: Code Quality Check
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v1.5-variegata
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@main
     with:
-      duckdb_version: v1.5.4
-      ci_tools_version: v1.5-variegata
+      duckdb_version: v2.0-cyanoptera
+      ci_tools_version: main
       extension_name: mmcif
       format_checks: 'format;tidy'
