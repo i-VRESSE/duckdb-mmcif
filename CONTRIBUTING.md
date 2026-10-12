@@ -68,7 +68,7 @@ See [docs/UPDATING.md](docs/UPDATING.md).
 ## Updating the bundled dictionaries
 
 The extension embeds combined type, relationship and documentation indexes for
-PDBx/mmCIF v5, IHMCIF, flrCIF and 3DEM. Builds and queries never download or parse
+PDBx/mmCIF v5, IHMCIF, flrCIF, 3DEM and ModelCIF. Builds and queries never download or parse
 source dictionaries. `dict/sources.json` pins the source versions, URLs and
 SHA-256 checksums; the generator uses only Python's standard library.
 
