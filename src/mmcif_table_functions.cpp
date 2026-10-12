@@ -579,8 +579,9 @@ TableFunction MmcifScanFunction() {
 	result.projection_pushdown = true;
 	result.table_scan_progress = MmcifScanProgress;
 	result.cardinality = MmcifScanCardinality;
-	result.GetSignature().WithTypedKwargs(
-	    "options", [](TypedKwargs &options) { options.Add("column_source", LogicalType::VARCHAR); });
+	result.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("data_block", LogicalType::VARCHAR).Add("column_source", LogicalType::VARCHAR);
+	});
 	return result;
 }
 
@@ -720,13 +721,9 @@ static unique_ptr<FunctionData> MmcifRelationshipsBind(ClientContext &context, T
 static void MmcifRegisterDescribed(ExtensionLoader &loader, TableFunction function, vector<string> parameter_names,
                                    string description, vector<string> examples) {
 	if (function.name != "mmcif_blocks") {
-		auto configure = [](TypedKwargs &options) {
-			options.Add("data_block", LogicalType::VARCHAR);
-		};
-		if (function.GetSignature().GetTypedKwargs()) {
-			function.GetSignature().ExtendTypedKwargs(configure);
-		} else {
-			function.GetSignature().WithTypedKwargs("options", configure);
+		if (function.name != "mmcif_scan") {
+			function.GetSignature().WithTypedKwargs(
+			    "options", [](TypedKwargs &options) { options.Add("data_block", LogicalType::VARCHAR); });
 		}
 		parameter_names.push_back("data_block");
 		description += " Select a block with data_block := 'name'; defaults to the first block.";
@@ -737,6 +734,9 @@ static void MmcifRegisterDescribed(ExtensionLoader &loader, TableFunction functi
 		               "parallel readers capped by threads. Missing items are typed NULLs and absent known categories "
 		               "yield no rows. Unknown categories or items in the requested category error; use column_source "
 		               ":= 'files' to discover the column union from input files and include custom items.";
+	}
+	for (idx_t i = 0; i < function.GetSignature().GetPositionalParameterCount(); i++) {
+		function.GetSignature().GetParameter(i).SetName(Identifier(parameter_names[i]));
 	}
 	FunctionDescription desc;
 	desc.parameter_names = std::move(parameter_names);
