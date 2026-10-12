@@ -13,11 +13,15 @@ SELECT * FROM mmcif_tables('integrative_model.cif');
 SELECT * FROM mmcif_scan('integrative_model.cif', 'ihm_model_list');
 ```
 
-Only categories and columns present in the selected data block are exposed.
+ATTACH and metadata functions expose only categories and columns present in the
+selected data block. `mmcif_scan` defaults to all columns defined for the requested
+category in the bundled dictionaries, with missing values as typed NULLs.
 The combined dictionary supplies types, documentation links and relationships,
 including links between extension categories and base categories. Catalog
 comments link to the dictionary defining each category or item. Unknown items
-keep the `VARCHAR` fallback. Dictionary ranges and comma-separated integer
+keep the `VARCHAR` fallback in ATTACH and `column_source := 'files'` scans.
+Default dictionary scans reject unknown categories or items in the requested
+category and suggest explicit files mode. Dictionary ranges and comma-separated integer
 lists also remain `VARCHAR` so values such as `3-174` are preserved.
 
 Shared definitions keep the current base dictionary's types and documentation;

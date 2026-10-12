@@ -73,7 +73,7 @@ SELECT FORSTER_RADIUS_VALUE FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/mmc
 52.5
 
 query T
-SELECT value FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/mmcif_extensions.cif', 'custom');
+SELECT value FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/mmcif_extensions.cif', 'custom', column_source := 'files');
 ----
 0123
 

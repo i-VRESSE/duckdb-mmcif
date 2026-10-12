@@ -74,6 +74,7 @@ public:
 	MmcifSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, MmcifCatalog *catalog_p);
 
 	MmcifCatalog *catalog;
+	mutex tables_lock;
 	case_insensitive_map_t<unique_ptr<MmcifTableEntry>> tables; // keep entries alive across Scan/LookupEntry
 
 	optional_ptr<CatalogEntry> CreateTable(CatalogTransaction transaction, BoundCreateTableInfo &info) override;

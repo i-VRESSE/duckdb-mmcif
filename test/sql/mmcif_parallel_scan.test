@@ -1,0 +1,83 @@
+# name: test/sql/mmcif_parallel_scan.test
+# description: Bounded dictionary readers preserve rows, strings and file order
+# group: [sql]
+
+require mmcif
+
+statement ok
+SET threads = 4;
+
+# Distinct gzip files with several output chunks and long retained strings.
+loop i 0 16
+
+statement ok
+COPY (SELECT 'data_atoms' || chr(10) || 'loop_' || chr(10) || '_atom_site.id' || chr(10) || '_atom_site.label_atom_id' || chr(10) || '_atom_site.Cartn_x' || chr(10) || string_agg((${i} * 4097 + j)::VARCHAR || ' long_atom_name_' || (${i} * 4097 + j)::VARCHAR || ' ' || (${i} * 4097 + j)::VARCHAR, chr(10) ORDER BY j) AS content FROM range(4097) t(j)) TO '__TEST_DIR__/mmcif_parallel_${i}.cif.gz' (FORMAT CSV, HEADER false, QUOTE '', COMPRESSION gzip);
+
+endloop
+
+# No rows or strings may be lost, repeated or misattributed across workers.
+query IIIII
+SELECT count(*), count(DISTINCT id), count(DISTINCT label_atom_id), count(DISTINCT filename), count(label_seq_id) FROM mmcif_scan('__TEST_DIR__/mmcif_parallel_*.cif.gz', 'atom_site', column_source := 'dictionary');
+----
+65552	65552	65552	16	0
+
+query I
+SELECT sum(Cartn_x)::BIGINT FROM mmcif_scan('__TEST_DIR__/mmcif_parallel_*.cif.gz', 'atom_site', column_source := 'dictionary');
+----
+2148499576
+
+# A materialized result must outlive all worker file buffers.
+query I
+WITH atoms AS MATERIALIZED (SELECT label_atom_id FROM mmcif_scan('__TEST_DIR__/mmcif_parallel_*.cif.gz', 'atom_site', column_source := 'dictionary')) SELECT count(*) FROM atoms WHERE label_atom_id = 'long_atom_name_60000';
+----
+1
+
+# Batch indices retain explicit file order when DuckDB preserves insertion order.
+statement ok
+CREATE TEMP TABLE mmcif_parallel_ordered AS SELECT id::BIGINT AS id FROM mmcif_scan(['__TEST_DIR__/mmcif_parallel_0.cif.gz', '__TEST_DIR__/mmcif_parallel_1.cif.gz', '__TEST_DIR__/mmcif_parallel_2.cif.gz', '__TEST_DIR__/mmcif_parallel_3.cif.gz'], 'atom_site', column_source := 'dictionary');
+
+query I
+SELECT count(*) FROM (SELECT id, row_number() OVER () - 1 AS row_id FROM mmcif_parallel_ordered) WHERE id <> row_id;
+----
+0
+
+# Duplicate input paths are separate reads with independent cursors.
+query II
+SELECT count(*), count(DISTINCT id) FROM mmcif_scan(['__TEST_DIR__/mmcif_parallel_0.cif.gz', '__TEST_DIR__/mmcif_parallel_0.cif.gz', '__TEST_DIR__/mmcif_parallel_1.cif.gz'], 'atom_site', column_source := 'dictionary');
+----
+12291	8194
+
+# Compare the complete multi-chunk output with the one-thread reader.
+statement ok
+SET threads = 1;
+
+statement ok
+CREATE TEMP TABLE mmcif_serial_atoms AS SELECT filename, id, label_atom_id, Cartn_x FROM mmcif_scan('__TEST_DIR__/mmcif_parallel_*.cif.gz', 'atom_site', column_source := 'dictionary');
+
+query II
+SELECT count(*), count(filename) FROM mmcif_serial_atoms;
+----
+65552	65552
+
+statement ok
+SET threads = 4;
+
+query I
+SELECT count(*) FROM (SELECT filename, id, label_atom_id, Cartn_x FROM mmcif_scan('__TEST_DIR__/mmcif_parallel_*.cif.gz', 'atom_site', column_source := 'dictionary') EXCEPT ALL SELECT * FROM mmcif_serial_atoms);
+----
+0
+
+# Errors encountered by a worker propagate to the query.
+statement ok
+COPY (SELECT 'data_bad' || chr(10) || '_atom_site.custom_item invalid') TO '__TEST_DIR__/mmcif_parallel_bad.cif' (FORMAT CSV, HEADER false, QUOTE '');
+
+statement error
+SELECT count(*) FROM mmcif_scan(['__TEST_DIR__/mmcif_parallel_0.cif.gz', '__TEST_DIR__/mmcif_parallel_bad.cif', '__TEST_DIR__/mmcif_parallel_1.cif.gz'], 'atom_site', column_source := 'dictionary');
+----
+not in the bundled dictionary
+
+# Plain LIMIT remains lazy under the default insertion-order setting.
+query T
+SELECT id FROM mmcif_scan(['__TEST_DIR__/mmcif_parallel_0.cif.gz', '__TEST_DIR__/mmcif_parallel_bad.cif'], 'atom_site', column_source := 'dictionary') LIMIT 1;
+----
+0

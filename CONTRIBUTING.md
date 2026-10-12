@@ -68,7 +68,7 @@ See [docs/UPDATING.md](docs/UPDATING.md).
 ## Updating the bundled dictionaries
 
 The extension embeds combined type, relationship and documentation indexes for
-PDBx/mmCIF v5, IHMCIF, flrCIF and 3DEM. Builds and queries never download or parse
+PDBx/mmCIF v5, IHMCIF, flrCIF, 3DEM and ModelCIF. Builds and queries never download or parse
 source dictionaries. `dict/sources.json` pins the source versions, URLs and
 SHA-256 checksums; the generator uses only Python's standard library.
 
@@ -103,7 +103,7 @@ SHA-256 checksums; the generator uses only Python's standard library.
    Saveframes, scalar fields and loop fields are parsed, including both
    `_item_linked` and `_pdbx_item_linked_group_list` relationships. Duplicate
    items and links are merged case-insensitively. Documentation ownership
-   follows the manifest order: base, IHMCIF, flrCIF, 3DEM. This keeps base URLs
+   follows the manifest order: base, IHMCIF, flrCIF, 3DEM, ModelCIF. This keeps base URLs
    for shared definitions while linking extension-only items to their source.
 
    Differing DuckDB types stop generation unless an exact resolution is
