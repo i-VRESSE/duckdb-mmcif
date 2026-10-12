@@ -18,6 +18,7 @@
 #include "mmcif_write_store.hpp"
 #include "duckdb/execution/execution_context.hpp"
 #include "duckdb/parallel/thread_context.hpp"
+#include "duckdb/storage/statistics/node_statistics.hpp"
 
 #include <cstring>
 #include <filesystem>
@@ -852,6 +853,68 @@ TEST_CASE("mmcif scan progress counts completed files without reading ahead", "[
 		REQUIRE(output.size() == counts[step]);
 		REQUIRE(function.table_scan_progress(context, &bind, state.get()) == Approx(expected[step]));
 	}
+}
+
+TEST_CASE("mmcif dictionary cardinality estimates stay advisory and do not read files", "[mmcif][cardinality]") {
+	DuckDB database(nullptr);
+	Connection connection(database);
+	auto &context = *connection.context;
+	auto function = MmcifScanFunction();
+	for (auto &category : {"cell", "atom_site", "custom"}) {
+		MmcifBindData bind;
+		bind.dictionary_schema = true;
+		bind.table_name = category;
+		// Nonexistent paths ensure planning cannot perform file discovery.
+		bind.paths = {"no_such_cardinality_a.cif", "no_such_cardinality_b.cif"};
+		auto stats = function.cardinality(context, &bind);
+		REQUIRE(stats->has_estimated_cardinality);
+		REQUIRE(stats->estimated_cardinality == 2);
+		REQUIRE_FALSE(stats->has_max_cardinality);
+	}
+}
+
+TEST_CASE("mmcif cardinality prefers observed counts without counting uncached loops", "[mmcif][cardinality]") {
+	TempCif loop("cardinality_loop.cif", "data_loop\nloop_\n_cell.entry_id\nA\nB\n");
+	TempCif empty("cardinality_empty.cif", "data_empty\nloop_\n_cell.entry_id\n");
+	TempCif single("cardinality_single.cif", "data_single\n_cell.entry_id C\n");
+	TempCif missing("cardinality_missing.cif", "data_missing\n_entry.id M\n");
+	DuckDB database(nullptr);
+	Connection connection(database);
+	auto &context = *connection.context;
+	auto function = MmcifScanFunction();
+	auto check = [&](const MmcifBindData &bind, idx_t expected) {
+		auto stats = function.cardinality(context, &bind);
+		REQUIRE(stats->has_estimated_cardinality);
+		REQUIRE(stats->estimated_cardinality == expected);
+		REQUIRE_FALSE(stats->has_max_cardinality);
+	};
+	auto index = MmcifIndex::Load(loop.Str(), nullptr);
+	auto category = index->FindCategory("cell");
+	MmcifBindData attached;
+	MmcifBindIndex(attached, index, "cell");
+	check(attached, 1);
+	REQUIRE(category->row_count.load() == idx_t(-1));
+	// A dictionary singleton may actually have two rows. Observed counts win.
+	REQUIRE(index->GetRowCount(*category) == 2);
+	check(attached, 2);
+
+	auto empty_index = MmcifIndex::Load(empty.Str(), nullptr);
+	REQUIRE(empty_index->GetRowCount(*empty_index->FindCategory("cell")) == 0);
+	auto single_index = MmcifIndex::Load(single.Str(), nullptr);
+	MmcifBindData files;
+	MmcifBindFiles(files, {loop.Str(), empty.Str(), single.Str(), missing.Str()},
+	               {index, empty_index, single_index, MmcifIndex::Load(missing.Str(), nullptr)}, "cell");
+	check(files, 3); // two loop rows + zero empty rows + one single-tag row
+	REQUIRE(single_index->FindCategory("cell")->row_count.load() == idx_t(-1));
+
+	MmcifBindData write;
+	write.store = index->Materialize();
+	write.write_category = write.store->FindCategory("cell");
+	check(write, 2);
+	write.store->AddRow(*write.write_category, {"C"});
+	check(write, 3);
+	write.store->DeleteRows(*write.write_category, {0, 1, 2});
+	check(write, 0);
 }
 
 TEST_CASE("parallel mmcif workers keep independent cursors and completed-file progress", "[mmcif][parallel]") {

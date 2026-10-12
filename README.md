@@ -189,6 +189,15 @@ dictionary mode. Files have equal weight, so large files can make the bar pause.
 The callback reports execution progress; glob expansion and explicit file-based
 column discovery happen during binding and have no progress feedback.
 
+File-discovered and attached scans prefer materialized write-store sizes or
+already-cached category counts for planner estimates. Otherwise, dictionary
+single-row categories are
+estimated at one row per selected block/file; other categories retain the
+one-row-per-file fallback. Planning does not open files or count uncached loops
+to obtain these estimates. Estimates do not impose row limits or validate files:
+nonconforming files still return all rows, and missing categories can contribute
+zero rows in dictionary mode.
+
 Use a single scan for parallel aggregates:
 
 ```sql

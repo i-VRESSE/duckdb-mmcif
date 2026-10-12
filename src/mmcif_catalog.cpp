@@ -222,8 +222,8 @@ MmcifTableEntry::MmcifTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, C
 
 unique_ptr<BaseStatistics> MmcifTableEntry::GetStatistics(ClientContext &context, column_t column_id) {
 	// Real min/max stats require a full category scan, which we deliberately
-	// avoid to keep LIMIT/schema queries cheap. Stats are skipped; the planner
-	// still gets exact cardinality from GetStorageInfo.
+	// avoid to keep LIMIT/schema queries cheap. Column stats are skipped; the
+	// shared scan callback uses known row counts or advisory estimates.
 	return nullptr;
 }
 

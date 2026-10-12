@@ -1,0 +1,59 @@
+# name: test/sql/mmcif_cardinality.test
+# description: advisory row estimates preserve nonconforming singleton categories
+# group: [sql]
+
+require mmcif
+
+statement ok
+COPY (SELECT 'data_invalid' || chr(10) || 'loop_' || chr(10) || '_cell.entry_id' || chr(10) || 'A' || chr(10) || 'B' || chr(10) AS text) TO '__TEST_DIR__/mmcif_cardinality.cif' (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '');
+
+query I
+SELECT is_single_row::INTEGER FROM mmcif_tables('__TEST_DIR__/mmcif_cardinality.cif');
+----
+1
+
+# Dictionary mode has only an estimate; both rows must still be returned.
+query I
+SELECT count(*) FROM mmcif_scan('__TEST_DIR__/mmcif_cardinality.cif', 'cell');
+----
+2
+
+query I
+SELECT count(*) FROM mmcif_scan('__TEST_DIR__/mmcif_cardinality.cif', 'cell', column_source := 'files');
+----
+2
+
+statement error
+SELECT (SELECT entry_id FROM mmcif_scan('__TEST_DIR__/mmcif_cardinality.cif', 'cell'));
+----
+More than one row returned by a subquery used as an expression
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_cardinality.cif' AS estimated (TYPE mmcif, READ_WRITE TRUE);
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO estimated.cell VALUES ('C');
+
+query I
+SELECT count(*) FROM estimated.cell;
+----
+3
+
+statement error
+SELECT (SELECT entry_id FROM estimated.cell);
+----
+More than one row returned by a subquery used as an expression
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT count(*) FROM estimated.cell;
+----
+2
+
+statement ok
+DETACH estimated;
