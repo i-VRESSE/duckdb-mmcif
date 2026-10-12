@@ -207,8 +207,7 @@ LEFT JOIN resolutions r USING (filename)
 LEFT JOIN deposits d USING (filename);
 ```
 
-The glob should match multiple files for this filename-based join. Each queried
-category must occur in at least one matched file. Aggregate categories with
+The glob should match multiple files for this filename-based join. Aggregate categories with
 multiple rows per file before joining to avoid multiplying results; left joins
 retain entries missing a resolution or deposition date. A runnable version lives
 in [`metadata_multiple.sql`](docs/examples/metadata_multiple.sql).
