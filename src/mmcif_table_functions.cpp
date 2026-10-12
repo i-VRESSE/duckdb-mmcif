@@ -261,7 +261,7 @@ static unique_ptr<string> MmcifDataBlock(TableFunctionBindInput &input) {
 }
 
 static unique_ptr<FunctionData> MmcifBind(ClientContext &context, TableFunctionBindInput &input,
-                                          vector<LogicalType> &return_types, vector<string> &names) {
+                                          vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto paths = MmcifExpandFiles(context, input.inputs[0]);
 	auto table_name = input.inputs[1].GetValue<string>();
 	auto result = make_uniq<MmcifBindData>();
@@ -312,7 +312,9 @@ static unique_ptr<FunctionData> MmcifBind(ClientContext &context, TableFunctionB
 	} else {
 		throw BinderException("mmcif: column_source must be 'files' or 'dictionary'");
 	}
-	names.assign(result->column_names.begin(), result->column_names.end());
+	for (auto &name : result->column_names) {
+		names.push_back(Identifier(name));
+	}
 	return_types.assign(result->column_types.begin(), result->column_types.end());
 	return std::move(result);
 }
@@ -457,15 +459,15 @@ static void MmcifScan(ClientContext &context, TableFunctionInput &data, DataChun
 	vector<string_t *> ptrs(out_cols);
 	for (idx_t c = 0; c < out_cols; c++) {
 		tmp[c] = make_uniq<Vector>(LogicalType::VARCHAR);
-		ptrs[c] = FlatVector::GetData<string_t>(*tmp[c]);
+		ptrs[c] = FlatVector::GetDataMutable<string_t>(*tmp[c]);
 	}
 	idx_t count;
 	while (true) {
 		// Missing union columns start as NULL for each file/chunk.
 		for (idx_t c = 0; c < out_cols; c++) {
-			FlatVector::Validity(*tmp[c]).SetAllValid(STANDARD_VECTOR_SIZE);
+			FlatVector::ValidityMutable(*tmp[c]).SetAllValid(STANDARD_VECTOR_SIZE);
 			if (!lstate.bind.write_category && lstate.out_to_full[c] == DConstants::INVALID_INDEX) {
-				FlatVector::Validity(*tmp[c]).SetAllInvalid(STANDARD_VECTOR_SIZE);
+				FlatVector::ValidityMutable(*tmp[c]).SetAllInvalid(STANDARD_VECTOR_SIZE);
 			}
 		}
 		count = lstate.bind.write_category ? MmcifScanStore(output, lstate, tmp, ptrs)
@@ -490,9 +492,10 @@ static void MmcifScan(ClientContext &context, TableFunctionInput &data, DataChun
 			if (lstate.column_ids[c] == lstate.bind.filename_column) {
 				// The missing-column mask must not survive into a filename
 				// constant, especially when downstream storage flattens it.
-				FlatVector::Validity(*tmp[c]).SetAllValid(STANDARD_VECTOR_SIZE);
+				FlatVector::ValidityMutable(*tmp[c]).SetAllValid(STANDARD_VECTOR_SIZE);
 				tmp[c]->Reference(Value(lstate.bind.dictionary_schema ? lstate.bind.paths[lstate.file_position]
-				                                                      : lstate.bind.files[lstate.file_position].path));
+				                                                      : lstate.bind.files[lstate.file_position].path),
+				                  count_t(count));
 			}
 		}
 	}
@@ -576,7 +579,9 @@ TableFunction MmcifScanFunction() {
 	result.projection_pushdown = true;
 	result.table_scan_progress = MmcifScanProgress;
 	result.cardinality = MmcifScanCardinality;
-	result.named_parameters["column_source"] = LogicalType::VARCHAR;
+	result.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("data_block", LogicalType::VARCHAR).Add("column_source", LogicalType::VARCHAR);
+	});
 	return result;
 }
 
@@ -626,7 +631,7 @@ static void MmcifMetaScan(ClientContext &context, TableFunctionInput &data, Data
 
 // mmcif_blocks(file): names in file order, without the data_ prefix.
 static unique_ptr<FunctionData> MmcifBlocksBind(ClientContext &context, TableFunctionBindInput &input,
-                                                vector<LogicalType> &return_types, vector<string> &names) {
+                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<MmcifMetaBindData>();
 	auto index = MmcifIndex::Load(input.inputs[0].GetValue<string>(), &context);
 	for (auto &name : index->GetDataBlockNames()) {
@@ -639,7 +644,7 @@ static unique_ptr<FunctionData> MmcifBlocksBind(ClientContext &context, TableFun
 
 // mmcif_tables(file): present categories with offline dictionary metadata
 static unique_ptr<FunctionData> MmcifTablesBind(ClientContext &context, TableFunctionBindInput &input,
-                                                vector<LogicalType> &return_types, vector<string> &names) {
+                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto result = make_uniq<MmcifMetaBindData>();
 	auto index = MmcifIndex::Load(file_name, &context, MmcifDataBlock(input).get());
@@ -660,7 +665,7 @@ static unique_ptr<FunctionData> MmcifTablesBind(ClientContext &context, TableFun
 
 // mmcif_columns(file): table_name, column_name, column_index, comment, data_type
 static unique_ptr<FunctionData> MmcifColumnsBind(ClientContext &context, TableFunctionBindInput &input,
-                                                 vector<LogicalType> &return_types, vector<string> &names) {
+                                                 vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto result = make_uniq<MmcifMetaBindData>();
 	auto index = MmcifIndex::Load(file_name, &context, MmcifDataBlock(input).get());
@@ -691,7 +696,7 @@ static std::pair<string, string> MmcifSplitItem(const string &item) {
 
 // mmcif_relationships(file): parent_table, parent_column, child_table, child_column
 static unique_ptr<FunctionData> MmcifRelationshipsBind(ClientContext &context, TableFunctionBindInput &input,
-                                                       vector<LogicalType> &return_types, vector<string> &names) {
+                                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto file_name = input.inputs[0].GetValue<string>();
 	auto result = make_uniq<MmcifMetaBindData>();
 	auto index = MmcifIndex::Load(file_name, &context, MmcifDataBlock(input).get());
@@ -716,7 +721,10 @@ static unique_ptr<FunctionData> MmcifRelationshipsBind(ClientContext &context, T
 static void MmcifRegisterDescribed(ExtensionLoader &loader, TableFunction function, vector<string> parameter_names,
                                    string description, vector<string> examples) {
 	if (function.name != "mmcif_blocks") {
-		function.named_parameters["data_block"] = LogicalType::VARCHAR;
+		if (function.name != "mmcif_scan") {
+			function.GetSignature().WithTypedKwargs(
+			    "options", [](TypedKwargs &options) { options.Add("data_block", LogicalType::VARCHAR); });
+		}
 		parameter_names.push_back("data_block");
 		description += " Select a block with data_block := 'name'; defaults to the first block.";
 	}
@@ -727,6 +735,9 @@ static void MmcifRegisterDescribed(ExtensionLoader &loader, TableFunction functi
 		               "yield no rows. Unknown categories or items in the requested category error; use column_source "
 		               ":= 'files' to discover the column union from input files and include custom items.";
 	}
+	for (idx_t i = 0; i < function.GetSignature().GetPositionalParameterCount(); i++) {
+		function.GetSignature().GetParameter(i).SetName(Identifier(parameter_names[i]));
+	}
 	FunctionDescription desc;
 	desc.parameter_names = std::move(parameter_names);
 	desc.description = std::move(description);
@@ -736,7 +747,12 @@ static void MmcifRegisterDescribed(ExtensionLoader &loader, TableFunction functi
 	                                                           : TableFunctionSet(std::move(function)));
 	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
 	for (auto &overload : info.functions.functions) {
-		desc.parameter_types = overload.arguments;
+		desc.parameter_types.clear();
+		for (auto &parameter : overload->GetSignature().GetParameters()) {
+			if (!parameter.IsVariadic()) {
+				desc.parameter_types.push_back(parameter.GetType());
+			}
+		}
 		info.descriptions.push_back(desc);
 	}
 	loader.RegisterFunction(std::move(info));
