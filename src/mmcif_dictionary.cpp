@@ -43,6 +43,10 @@ DictionaryIndex::DictionaryIndex() {
 		} else {
 			types[item] = LogicalType::VARCHAR;
 		}
+		auto dot = item.find('.');
+		if (dot != string::npos && !item.empty() && item[0] == '_') {
+			columns[item.substr(1, dot - 1)].push_back(item.substr(dot + 1));
+		}
 	});
 	MmcifForEachTsvRow(MMCIFF_RELATIONSHIPS_GZ, MMCIFF_RELATIONSHIPS_GZ_SIZE,
 	                   [&](string parent, string child) { relationships.emplace_back(parent, child); });
@@ -77,6 +81,11 @@ string DictionaryIndex::GetItemUrl(const string &category, const string &column)
 		return entry->second + "/Items/" + entry->first + ".html";
 	}
 	return "https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/" + key + ".html";
+}
+
+const vector<string> *DictionaryIndex::GetColumns(const string &category) const {
+	auto entry = columns.find(category);
+	return entry == columns.end() ? nullptr : &entry->second;
 }
 
 const std::vector<std::pair<std::string, std::string>> &DictionaryIndex::GetRelationships() const {

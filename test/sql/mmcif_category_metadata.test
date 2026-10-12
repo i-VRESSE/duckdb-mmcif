@@ -1,3 +1,6 @@
+# name: test/sql/mmcif_category_metadata.test
+# group: [sql]
+
 require mmcif
 
 # Dictionary row limits do not depend on the one observed row per category.

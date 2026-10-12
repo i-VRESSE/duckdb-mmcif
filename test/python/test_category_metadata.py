@@ -1,4 +1,5 @@
 """Offline generator regression tests (python3 -m unittest discover -s test/python)."""
+
 import gzip
 import importlib.util
 import hashlib
@@ -21,7 +22,8 @@ class CategoryMetadataTests(unittest.TestCase):
             return generator.parse_categories(path)
 
     def test_scalar_loop_keys_links_and_unknown_constraints(self):
-        metadata = self.parse('''data_dictionary
+        metadata = self.parse(
+            '''data_dictionary
 save_entry
 _category.id entry
 _category_key.name '_entry.id'
@@ -94,7 +96,8 @@ _item.name '_indirect.ref'
 _item_linked.child_name '_indirect.ref'
 _item_linked.parent_name '_single.ref'
 save_
-''')
+'''
+        )
         for name in ("entry", "single", "indirect"):
             self.assertIs(metadata[name]["is_single_row"], True)
         self.assertIs(metadata["multiple"]["is_single_row"], False)
@@ -114,7 +117,8 @@ save_
         self.assertEqual(len(description.split("\t")), 3)
 
     def test_incomplete_keys_and_unavailable_links_remain_unknown(self):
-        metadata = self.parse("""data_dictionary
+        metadata = self.parse(
+            """data_dictionary
 save_entry
 _category.id entry
 _category_key.name '_entry.id'
@@ -139,7 +143,8 @@ _item.name '_unknown_link.id'
 _item_linked.child_name '_unknown_link.id'
 _item_linked.parent_name ?
 save_
-""")
+"""
+        )
         self.assertIsNone(metadata["partial"]["is_single_row"])
         self.assertIsNone(metadata["unknown_link"]["is_single_row"])
 
@@ -180,10 +185,15 @@ save_
             for name, content in contents.items():
                 path = root / name
                 path.write_text(content)
-                sources.append({"filename": name, "version": "1",
-                                "url": "https://example.org/" + name,
-                                "documentation_url": "https://example.org/" + name,
-                                "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+                sources.append(
+                    {
+                        "filename": name,
+                        "version": "1",
+                        "url": "https://example.org/" + name,
+                        "documentation_url": "https://example.org/" + name,
+                        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    }
+                )
             manifest = root / "sources.json"
             manifest.write_text(json.dumps({"sources": sources, "type_conflicts": {}}))
             generator.generate(root, root / "output", manifest)
@@ -213,8 +223,10 @@ save_
         text = "data_dictionary\n"
         for category, links in definitions.items():
             item = f"_{category}.id"
-            text += (f"save_{category}\n_category.id {category}\n_category_key.name '{item}'\nsave_\n"
-                     f"save_{item}\n_item.name '{item}'\n")
+            text += (
+                f"save_{category}\n_category.id {category}\n_category_key.name '{item}'\nsave_\n"
+                f"save_{item}\n_item.name '{item}'\n"
+            )
             if links:
                 text += "loop_\n_item_linked.child_name\n_item_linked.parent_name\n"
                 text += "".join(f"'{item}' '{parent}'\n" for parent in links)

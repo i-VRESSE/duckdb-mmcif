@@ -329,6 +329,9 @@ static ColumnDefinition MmcifColumnDefinition(DictionaryIndex &dictionary, const
 }
 
 MmcifTableEntry &MmcifSchemaEntry::GetTableEntry(CatalogTransaction transaction, const string &entry_name) {
+	// Parallel duckdb_tables/duckdb_columns scans can populate this cache
+	// concurrently. Protect lookup and insertion so entries stay unique/alive.
+	lock_guard<mutex> guard(tables_lock);
 	// Cache: reuse an existing entry instead of replacing it. Scans keep a raw
 	// pointer to the returned MmcifTableEntry in their bind data; replacing the
 	// map entry would free that object while still referenced (e.g. a DELETE
@@ -647,6 +650,21 @@ static bool MmcifAttachWriteMode(const AttachInfo &info) {
 static unique_ptr<Catalog> MmcifAttach(optional_ptr<StorageExtensionInfo> storage_info, ClientContext &context,
                                        AttachedDatabase &db, const string &name, AttachInfo &info,
                                        AttachOptions &attach_options) {
+	string glob_path = info.path;
+	if (MmcifFile::IsRemotePath(info.path)) {
+		// Only the URI path can be a glob: query strings, fragments and
+		// bracketed IPv6 hosts are part of an exact remote address.
+		auto path_start = info.path.find_first_of("/?#", info.path.find("://") + 3);
+		glob_path = path_start != string::npos && info.path[path_start] == '/' ? info.path.substr(path_start) : "";
+		glob_path = glob_path.substr(0, glob_path.find_first_of("?#"));
+	} else if (FileSystem::HasGlob(info.path) && FileSystem::GetFileSystem(context).FileExists(info.path)) {
+		// An existing literal filename may contain glob metacharacters.
+		glob_path.clear();
+	}
+	if (FileSystem::HasGlob(glob_path)) {
+		throw InvalidInputException(
+		    "mmcif: ATTACH requires one exact file path; use mmcif_scan for globs or file lists");
+	}
 	bool write_mode = MmcifAttachWriteMode(info);
 	// Remote files (http/https/s3/...) are served through a streaming file
 	// system and cannot be rewritten in place, so they are always read-only.

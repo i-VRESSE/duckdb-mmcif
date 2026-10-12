@@ -57,7 +57,7 @@ curl -o test/data/1amb_updated.cif https://www.ebi.ac.uk/pdbe/entry-files/downlo
 - `dict/` — bundled dictionary types, relationships, documentation and category metadata
 - `test/sql/`, `test/data/` — SQLLogic tests and fixtures
 - `test/cpp/` — C++ Catch unit tests (run with `make test_cpp`)
-- `scripts/` — helper scripts (e.g. `mmcif_relationships_diagram.py`, which regenerates `rel.svg`)
+- `scripts/` — helper scripts (e.g. `mmcif_relationships_diagram.py`, which regenerates `docs/diagrams/pdbx.svg`)
 - `docs/examples/` — ready-to-run example scripts
 - `duckdb/`, `extension-ci-tools/` — git submodules
 
@@ -106,7 +106,7 @@ SHA-256 checksums; the generator uses only Python's standard library.
    descriptions, groups, mandatory codes and row limits derived from complete
    category keys and their dictionary links. Category ownership follows the
    same source priority as documentation. Documentation ownership
-   follows the manifest order: base, IHMCIF, flrCIF, 3DEM. This keeps base URLs
+   follows the manifest order: base, IHMCIF, flrCIF, 3DEM, ModelCIF. This keeps base URLs
    for shared definitions while linking extension-only items to their source.
 
    Differing DuckDB types stop generation unless an exact resolution is

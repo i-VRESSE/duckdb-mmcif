@@ -17,8 +17,9 @@ import io
 import json
 from pathlib import Path
 
-NUMERIC_FLOAT = {"float", "float-range"}
-NUMERIC_INT = {"int", "positive_int", "int_list", "int-range"}
+# Ranges and comma-separated lists are textual values, not scalar numbers.
+NUMERIC_FLOAT = {"float"}
+NUMERIC_INT = {"int", "positive_int"}
 
 
 def duckdb_type(code):
@@ -311,7 +312,7 @@ def generate(directory, output_dir, manifest_path):
     sources = []
     category_metadata = {}
     metadata_parents = {}
-    provenance = "# Combined PDBx/mmCIF v5 + IHMCIF + flrCIF + 3DEM\n"
+    provenance = "# Combined PDBx/mmCIF v5 + IHMCIF + flrCIF + 3DEM + ModelCIF\n"
     for source in manifest["sources"]:
         path = Path(directory) / source["filename"]
         if hashlib.sha256(path.read_bytes()).hexdigest() != source["sha256"]:

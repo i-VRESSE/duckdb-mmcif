@@ -1,0 +1,4 @@
+data_c
+_entry.id c
+_struct.title 'Only in c'
+_pdbx_database_status.recvd_initial_deposition_date 2021-03-04
