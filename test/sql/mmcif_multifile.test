@@ -4,6 +4,49 @@
 
 require mmcif
 
+# An existing literal path takes precedence over glob metacharacters.
+statement ok
+COPY (SELECT 'data_literal' || chr(10) || '_entry.id literal') TO '__TEST_DIR__/mmcif_attach[ab].cif' (FORMAT CSV, HEADER false, QUOTE '');
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_attach[ab].cif' AS literal (TYPE mmcif);
+
+query T
+SELECT id FROM literal.entry;
+----
+literal
+
+statement ok
+DETACH literal;
+
+statement ok
+ATTACH '__TEST_DIR__/mmcif_attach[ab].cif' AS literal_write (TYPE mmcif, READ_WRITE TRUE);
+
+query T
+SELECT id FROM literal_write.entry;
+----
+literal
+
+statement ok
+DETACH literal_write;
+
+# Exact remote URLs must reach the read-only guard, not the glob guard.
+# A non-core scheme avoids httpfs autoload and network access in this test.
+statement error
+ATTACH 'weirdproto://host/file.cif?token=signed[value]*' AS signed_url (TYPE mmcif, READ_WRITE TRUE);
+----
+remote mmcif files are read-only
+
+statement error
+ATTACH 'weirdproto://[::1]/file.cif#fragment[*]' AS ipv6_url (TYPE mmcif, READ_WRITE TRUE);
+----
+remote mmcif files are read-only
+
+statement error
+ATTACH 'weirdproto://host/*.cif?token=signed' AS remote_glob (TYPE mmcif, READ_WRITE TRUE);
+----
+ATTACH requires one exact file path; use mmcif_scan
+
 # Glob access is provided by table functions, including a single-match glob.
 statement error
 ATTACH '__WORKING_DIRECTORY__/test/data/multifile/*.cif' AS cifs (TYPE mmcif);

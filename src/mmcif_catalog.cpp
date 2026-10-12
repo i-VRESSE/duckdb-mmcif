@@ -650,7 +650,18 @@ static bool MmcifAttachWriteMode(const AttachInfo &info) {
 static unique_ptr<Catalog> MmcifAttach(optional_ptr<StorageExtensionInfo> storage_info, ClientContext &context,
                                        AttachedDatabase &db, const string &name, AttachInfo &info,
                                        AttachOptions &attach_options) {
-	if (FileSystem::HasGlob(info.path)) {
+	string glob_path = info.path;
+	if (MmcifFile::IsRemotePath(info.path)) {
+		// Only the URI path can be a glob: query strings, fragments and
+		// bracketed IPv6 hosts are part of an exact remote address.
+		auto path_start = info.path.find_first_of("/?#", info.path.find("://") + 3);
+		glob_path = path_start != string::npos && info.path[path_start] == '/' ? info.path.substr(path_start) : "";
+		glob_path = glob_path.substr(0, glob_path.find_first_of("?#"));
+	} else if (FileSystem::HasGlob(info.path) && FileSystem::GetFileSystem(context).FileExists(info.path)) {
+		// An existing literal filename may contain glob metacharacters.
+		glob_path.clear();
+	}
+	if (FileSystem::HasGlob(glob_path)) {
 		throw InvalidInputException(
 		    "mmcif: ATTACH requires one exact file path; use mmcif_scan for globs or file lists");
 	}
