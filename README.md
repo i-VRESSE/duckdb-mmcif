@@ -77,7 +77,7 @@ coverage and ER diagrams from real archive examples.
 Five global table functions work without attaching anything:
 
 ```sql
--- one row per category with its dictionary documentation link and column count
+-- one row per category with its dictionary documentation and metadata
 SELECT * FROM mmcif_tables('1amb_updated.cif');
 
 -- one row per (category, column) with its inferred type
@@ -88,6 +88,27 @@ SELECT * FROM mmcif_relationships('1amb_updated.cif');
 
 -- scan a single category directly
 SELECT * FROM mmcif_scan('1amb_updated.cif', 'atom_site');
+```
+
+`mmcif_tables` returns `table_name`, `comment` (the dictionary documentation
+URL), `column_count`, `is_single_row BOOLEAN`, `description VARCHAR`,
+`category_groups VARCHAR[]`, and `is_mandatory BOOLEAN`, in that order.
+`is_single_row` describes the dictionary constraint of at most one row per data
+block, regardless of the file's observed row count. For example, `entry`, `cell`,
+and `struct` return `true`, while `atom_site` returns `false` even with one row.
+Optional single-row categories need not appear in a block. Descriptions come
+from `_category.description`; groups include all `_category_group.id` values
+in sorted order. `is_mandatory` reports `_category.mandatory_code` under the
+dictionary's general rules; it does not evaluate conditional requirements or
+validate the input. Unknown categories and unavailable metadata return `NULL`.
+
+Category metadata is bundled with the existing dictionary artifacts. Updating
+it is an offline maintenance step (the build and runtime never download the
+dictionary):
+
+```sh
+python3 scripts/generate_type_index.py /path/to/dictionaries --output-dir dict
+python3 -m unittest discover -s test/python
 ```
 
 The category and item documentation links are also exposed as `comment` by
@@ -167,6 +188,15 @@ Scans report completed files, including files without the requested category in
 dictionary mode. Files have equal weight, so large files can make the bar pause.
 The callback reports execution progress; glob expansion and explicit file-based
 column discovery happen during binding and have no progress feedback.
+
+File-discovered and attached scans prefer materialized write-store sizes or
+already-cached category counts for planner estimates. Otherwise, dictionary
+single-row categories are
+estimated at one row per selected block/file; other categories retain the
+one-row-per-file fallback. Planning does not open files or count uncached loops
+to obtain these estimates. Estimates do not impose row limits or validate files:
+nonconforming files still return all rows, and missing categories can contribute
+zero rows in dictionary mode.
 
 Use a single scan for parallel aggregates:
 

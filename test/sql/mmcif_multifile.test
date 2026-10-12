@@ -195,7 +195,7 @@ cannot take NULL input
 query I
 SELECT count(*) FROM mmcif_scan('__WORKING_DIRECTORY__/test/data/*.cif', 'atom_site', column_source := 'files');
 ----
-441
+442
 
 # Resolution/deposition metadata joins preserve entries with missing categories.
 statement ok

@@ -14,6 +14,7 @@
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
 #include "duckdb/common/operator/numeric_cast.hpp"
+#include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
@@ -27,6 +28,7 @@
 #include <utility>
 
 #include "mmcif_dictionary.hpp"
+#include "mmcif_category_metadata.hpp"
 
 namespace duckdb {
 
@@ -517,13 +519,48 @@ static double MmcifScanProgress(ClientContext &context, const FunctionData *bind
 	return total ? 100.0 * static_cast<double>(state.completed_files.load()) / static_cast<double>(total) : 100.0;
 }
 
-// Estimate one row per input file rather than the default one row for the
-// whole collection. This also gives the scan appropriate weight in DuckDB's
-// pipeline progress. It is an estimate, never a row bound or a discovery pass.
+// Only singleton metadata supplies a numeric row estimate. Multi-row-allowed
+// and unknown categories have no dictionary-derived count.
+static optional_idx MmcifDictionaryRowEstimate(const string &category) {
+	auto &single_row = MmcifCategoryMetadataIndex::Get().Lookup(category).is_single_row;
+	return !single_row.IsNull() && single_row.GetValue<bool>() ? optional_idx(1) : optional_idx();
+}
+
+static optional_idx MmcifCategoryRowEstimate(const MmcifCategory &category) {
+	auto known = category.row_count.load();
+	if (known != idx_t(-1)) {
+		return optional_idx(known);
+	}
+	if (!category.is_loop) {
+		return optional_idx(1);
+	}
+	return MmcifDictionaryRowEstimate(category.name);
+}
+
+// Prefer already-known counts, then dictionary estimates. Retain the existing
+// one-row-per-file fallback when neither is available. Never open a file or
+// count an uncached loop for planning, and never assert a maximum cardinality:
+// permissive scans and writable attachments can exceed dictionary row limits.
 static unique_ptr<NodeStatistics> MmcifScanCardinality(ClientContext &context, const FunctionData *bind_data) {
 	auto &bind = bind_data->Cast<MmcifBindData>();
-	auto files = bind.dictionary_schema ? bind.paths.size() : (bind.files.empty() ? idx_t(1) : bind.files.size());
-	return make_uniq<NodeStatistics>(files);
+	idx_t rows = 0;
+	if (bind.write_category) {
+		rows = bind.write_category->rows.size();
+	} else if (bind.dictionary_schema) {
+		auto estimate = MmcifDictionaryRowEstimate(bind.table_name);
+		rows = bind.paths.size() * (estimate.IsValid() ? estimate.GetIndex() : idx_t(1));
+	} else if (!bind.files.empty()) {
+		for (auto &file : bind.files) {
+			auto estimate = MmcifCategoryRowEstimate(*file.category);
+			rows += estimate.IsValid() ? estimate.GetIndex() : idx_t(1);
+		}
+	} else if (bind.category) {
+		auto estimate = MmcifCategoryRowEstimate(*bind.category);
+		rows = estimate.IsValid() ? estimate.GetIndex() : idx_t(1);
+	} else {
+		rows = 1;
+	}
+	return make_uniq<NodeStatistics>(rows);
 }
 
 // A file is a monotonically increasing batch for each worker. DuckDB can
@@ -600,7 +637,7 @@ static unique_ptr<FunctionData> MmcifBlocksBind(ClientContext &context, TableFun
 	return std::move(result);
 }
 
-// mmcif_tables(file): table_name, comment, column_count
+// mmcif_tables(file): present categories with offline dictionary metadata
 static unique_ptr<FunctionData> MmcifTablesBind(ClientContext &context, TableFunctionBindInput &input,
                                                 vector<LogicalType> &return_types, vector<string> &names) {
 	auto file_name = input.inputs[0].GetValue<string>();
@@ -608,11 +645,16 @@ static unique_ptr<FunctionData> MmcifTablesBind(ClientContext &context, TableFun
 	auto index = MmcifIndex::Load(file_name, &context, MmcifDataBlock(input).get());
 	auto &dictionary = DictionaryIndex::Get();
 	for (auto &cat : index->GetCategories()) {
+		auto &metadata = MmcifCategoryMetadataIndex::Get().Lookup(cat->name);
 		result->rows.push_back({Value(cat->name), Value(dictionary.GetCategoryUrl(cat->name)),
-		                        Value::BIGINT(NumericCast<int64_t>(cat->columns.size()))});
+		                        Value::BIGINT(NumericCast<int64_t>(cat->columns.size())), metadata.is_single_row,
+		                        metadata.description, metadata.category_groups, metadata.is_mandatory});
 	}
-	names = {"table_name", "comment", "column_count"};
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT};
+	names = {"table_name",  "comment",         "column_count", "is_single_row",
+	         "description", "category_groups", "is_mandatory"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT,
+	                LogicalType::BOOLEAN, LogicalType::VARCHAR, LogicalType::LIST(LogicalType::VARCHAR),
+	                LogicalType::BOOLEAN};
 	return std::move(result);
 }
 
@@ -722,7 +764,8 @@ void MmcifRegisterTableFunctions(ExtensionLoader &loader) {
 	mmcif_tables.projection_pushdown = true;
 	MmcifRegisterDescribed(loader, std::move(mmcif_tables), {"file"},
 	                       "List the categories in an mmCIF file with their dictionary documentation links and "
-	                       "column counts.",
+	                       "column counts, single-row constraints, descriptions, category groups and mandatory flags. "
+	                       "Dictionary metadata is independent of observed rows; unavailable metadata is NULL.",
 	                       {"SELECT * FROM mmcif_tables('https://files.rcsb.org/download/1AMB.cif.gz');"});
 
 	// mmcif_columns(file): one row per (category, column) with its inferred type.
