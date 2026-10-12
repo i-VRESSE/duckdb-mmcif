@@ -256,12 +256,8 @@ TableFunction MmcifTableEntry::GetScanFunction(ClientContext &context, unique_pt
 	bind_data = std::move(result);
 	auto scan_function = MmcifScanFunction();
 	// Expose the table entry so DELETE/UPDATE binder checks pass in write mode.
-	scan_function.get_bind_info = [](const optional_ptr<FunctionData> bind_data) -> BindInfo {
-		auto &bind = bind_data->Cast<MmcifBindData>();
-		if (!bind.table_entry) {
-			return BindInfo(ScanType::EXTERNAL);
-		}
-		return BindInfo(const_cast<TableCatalogEntry &>(*bind.table_entry));
+	scan_function.get_table_entry = [](optional_ptr<const FunctionData> bind_data) -> optional_ptr<TableCatalogEntry> {
+		return bind_data->Cast<MmcifBindData>().table_entry;
 	};
 	return scan_function;
 }

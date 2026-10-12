@@ -77,8 +77,8 @@ if(BUILD_MMCIF_CPP_TESTS)
   target_include_directories(mmcif_catch_tests
                              PRIVATE ${CMAKE_SOURCE_DIR}/third_party/catch)
   target_compile_definitions(mmcif_catch_tests PRIVATE DUCKDB_BUILD_LIBRARY)
-  target_link_libraries(mmcif_catch_tests ${EXTENSION_NAME} duckdb_static
-                        dummy_static_extension_loader)
+  target_link_libraries(mmcif_catch_tests duckdb_static)
+  duckdb_link_extensions(mmcif_catch_tests ${TARGET_NAME})
   add_dependencies(mmcif_catch_tests ${EXTENSION_NAME})
   set_target_properties(
     mmcif_catch_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY
