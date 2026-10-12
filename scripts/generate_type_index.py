@@ -229,7 +229,7 @@ def parse_categories(path):
 
 
 def derive_row_constraints(categories, parents, items):
-    """Prove singleton keys first; only defined independent keys prove multi-row."""
+    """Prove singleton keys, then propagate variation through resolved key links."""
     def fixed(item, single, visiting):
         if item == "_entry.id" and categories.get("entry", {}).get("keys") == ["_entry.id"]:
             return True
@@ -247,11 +247,34 @@ def derive_row_constraints(categories, parents, items):
         if not added:
             break
         single.update(added)
+
+    multiple = {name for name, meta in categories.items()
+                if name not in single and meta["keys"] and all(key in items for key in meta["keys"])
+                and any(key not in parents and not fixed(key, single, set()) for key in meta["keys"])}
+
+    def variable(item, visiting):
+        if item not in items or item in visiting or fixed(item, single, set()):
+            return False
+        linked = parents.get(item)
+        if linked:
+            # Every link must resolve to a varying key. An unknown link may
+            # impose a further constraint, so it cannot establish multi-row.
+            return all(variable(parent, visiting | {item}) for parent in linked)
+        category = item.lstrip("_").split(".")[0]
+        return category in multiple and item in categories[category]["keys"]
+
+    while True:
+        added = {name for name, meta in categories.items()
+                 if name not in single and meta["keys"] and all(key in items for key in meta["keys"])
+                 and any(variable(key, set()) for key in meta["keys"])} - multiple
+        if not added:
+            break
+        multiple.update(added)
+
     for name, meta in categories.items():
         if name in single:
             meta["is_single_row"] = True
-        elif meta["keys"] and all(key in items for key in meta["keys"]) and any(
-                key not in parents and not fixed(key, single, set()) for key in meta["keys"]):
+        elif name in multiple:
             meta["is_single_row"] = False
 
 

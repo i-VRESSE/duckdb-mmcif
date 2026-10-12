@@ -6,6 +6,7 @@ _struct_keywords.entry_id metadata
 _symmetry.entry_id metadata
 _atom_site.id 1
 _atom_site.label_atom_id CA
+_atom_site_anisotrop.id 1
 _struct_ref_seq.align_id 1
 _struct_ref_seq.ref_id 1
 _custom.id 1

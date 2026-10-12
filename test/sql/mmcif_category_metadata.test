@@ -5,6 +5,7 @@ query TI rowsort
 SELECT table_name, is_single_row::INTEGER FROM mmcif_tables('__WORKING_DIRECTORY__/test/data/mmcif_category_metadata.cif');
 ----
 atom_site	0
+atom_site_anisotrop	0
 cell	1
 custom	NULL
 entry	1

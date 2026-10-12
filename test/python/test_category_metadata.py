@@ -194,6 +194,40 @@ save_
             self.assertIn("extension\tis_single_row\ttrue\n", rows)
             self.assertIn("extension\tgroup\textension_group\n", rows)
 
+    def test_links_to_multi_row_keys_and_unresolved_links(self):
+        definitions = {
+            "entry": [],
+            "root": [],
+            "second_root": [],
+            "linked": ["_root.id"],
+            "chain_a": ["_chain_z.id"],
+            "chain_z": ["_linked.id"],
+            "two_parents": ["_root.id", "_second_root.id"],
+            "unresolved": ["_root.id", "_absent.id"],
+            "unavailable": ["_root.id", "?"],
+            "nonkey": ["_root.description"],
+            "single": ["_root.id", "_entry.id"],
+            "cycle_a": ["_cycle_z.id"],
+            "cycle_z": ["_cycle_a.id"],
+        }
+        text = "data_dictionary\n"
+        for category, links in definitions.items():
+            item = f"_{category}.id"
+            text += (f"save_{category}\n_category.id {category}\n_category_key.name '{item}'\nsave_\n"
+                     f"save_{item}\n_item.name '{item}'\n")
+            if links:
+                text += "loop_\n_item_linked.child_name\n_item_linked.parent_name\n"
+                text += "".join(f"'{item}' '{parent}'\n" for parent in links)
+            text += "save_\n"
+        # A non-key item in a multi-row category need not itself vary.
+        text += "save__root.description\n_item.name '_root.description'\nsave_\n"
+        metadata = self.parse(text)
+        for category in ("root", "second_root", "linked", "chain_a", "chain_z", "two_parents"):
+            self.assertIs(metadata[category]["is_single_row"], False, category)
+        for category in ("unresolved", "unavailable", "nonkey", "cycle_a", "cycle_z"):
+            self.assertIsNone(metadata[category]["is_single_row"], category)
+        self.assertIs(metadata["single"]["is_single_row"], True)
+
     def test_shipped_metadata(self):
         with gzip.open(ROOT / "dict/mmcif_categories.tsv.gz", "rt") as source:
             rows = [line.rstrip("\n").split("\t") for line in source if not line.startswith("#")]
@@ -201,6 +235,7 @@ save_
         for category in ("entry", "cell", "struct", "struct_keywords", "symmetry"):
             self.assertEqual(flags[category], "true")
         self.assertEqual(flags["atom_site"], "false")
+        self.assertEqual(flags["atom_site_anisotrop"], "false")
         groups = [value for category, field, value in rows if category == "cell" and field == "group"]
         self.assertEqual(groups, ["cell_group", "inclusive_group"])
 
