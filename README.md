@@ -74,53 +74,32 @@ coverage and ER diagrams from real archive examples.
 
 ## Table functions
 
-Five global table functions work without attaching anything:
+Query a file without attaching it:
 
 ```sql
--- one row per category with its dictionary documentation and metadata
+-- List categories and their dictionary documentation
 SELECT * FROM mmcif_tables('1amb_updated.cif');
 
--- one row per (category, column) with its inferred type
+-- List columns and their types
 SELECT * FROM mmcif_columns('1amb_updated.cif');
 
--- one row per parent/child relationship, each side a (table, column) pair
+-- Find relationships between categories
 SELECT * FROM mmcif_relationships('1amb_updated.cif');
 
--- scan a single category directly
+-- List data blocks
+SELECT * FROM mmcif_blocks('1amb_updated.cif');
+
+-- Read a category
 SELECT * FROM mmcif_scan('1amb_updated.cif', 'atom_site');
 ```
 
-`mmcif_tables` returns `table_name`, `comment` (the dictionary documentation
-URL), `column_count`, `is_single_row BOOLEAN`, `description VARCHAR`,
-`category_groups VARCHAR[]`, and `is_mandatory BOOLEAN`, in that order.
-`is_single_row` describes the dictionary constraint of at most one row per data
-block, regardless of the file's observed row count. For example, `entry`, `cell`,
-and `struct` return `true`, while `atom_site` returns `false` even with one row.
-Optional single-row categories need not appear in a block. Descriptions come
-from `_category.description`; groups include all `_category_group.id` values
-in sorted order. `is_mandatory` reports `_category.mandatory_code` under the
-dictionary's general rules; it does not evaluate conditional requirements or
-validate the input. Unknown categories and unavailable metadata return `NULL`.
-
-Category metadata is bundled with the existing dictionary artifacts. Updating
-it is an offline maintenance step (the build and runtime never download the
-dictionary):
-
-```sh
-python3 scripts/generate_type_index.py /path/to/dictionaries --output-dir dict
-python3 -m unittest discover -s test/python
-```
-
-The category and item documentation links are also exposed as `comment` by
-`duckdb_tables()` and `duckdb_columns()` for attached mmCIF databases.
-
-Piping a file through stdin works too (like `read_csv`), for all five table functions:
+All five functions also accept `/dev/stdin`:
 
 ```sh
 cat 1amb_updated.cif | duckdb -c "SELECT * FROM mmcif_scan('/dev/stdin', 'atom_site')"
 ```
 
-Entity/relationship diagram of the categories in `test/data/1amb_updated.cif`, as returned by `mmcif_relationships()`:
+Relationships in `test/data/1amb_updated.cif`:
 
 <!-- Generated with:
     python3 scripts/mmcif_relationships_diagram.py test/data/1amb_updated.cif -f dot \
@@ -130,141 +109,42 @@ Entity/relationship diagram of the categories in `test/data/1amb_updated.cif`, a
 
 ## Multiple files
 
-Use `mmcif_scan` to read a category from a glob or an explicit list of paths/globs:
-
-```sql
-SELECT * FROM mmcif_scan('structures/**/*.cif.gz', 'atom_site');
-SELECT * FROM mmcif_scan(['first.cif', 'more/*.cif.gz'], 'atom_site');
-```
-
-Columns match by name (case-insensitive), with dictionary types and typed `NULL`
-for items missing from a file. Files without the requested category contribute
-no rows. When the expanded input contains multiple files, the scan has a final
-`filename VARCHAR` column containing the concrete source path, even if only one
-file contains the category. A real category item named `filename` causes an error
-in this case. Inputs resolving to one file do not add an automatic `filename`.
-
-A known category absent from every matched file returns a typed empty result.
-A glob with no matches produces DuckDB's no-files error. Gzip files work alongside plain CIF.
-`data_block := 'name'` selects that block in every matched file; a file missing
-that block causes an error.
-
-By default, `column_source := 'dictionary'` uses the bundled PDBx/mmCIF, IHMCIF,
-flrCIF, 3DEM and ModelCIF definitions without reading file contents during binding:
+Read the same category from a glob or a list of paths/globs. Plain CIF and gzip
+files can be mixed:
 
 ```sql
 SELECT filename, id, Cartn_x
-FROM mmcif_scan('structures/**/*.cif.gz', 'atom_site')
-LIMIT 10;
+FROM mmcif_scan('structures/**/*.cif.gz', 'atom_site');
+
+SELECT * FROM mmcif_scan(['first.cif', 'more/*.cif.gz'], 'atom_site');
 ```
 
-This mode opens files as execution advances, using DuckDB workers to read
-multiple files in parallel. Each worker keeps one active file index; the number
-of readers is capped by the input file count and DuckDB's `threads` setting. It exposes all dictionary columns, including columns absent from every
-input; missing values are typed `NULL`. A known category absent from all files
-returns an empty result. Unknown categories fail at binding; unknown items in
-the requested category fail when their file is reached, with guidance to use
-`column_source := 'files'`. File and block errors are also deferred until that
-file is read. Glob expansion still happens before execution, and each active
-file is fully decompressed and indexed, so memory depends on its size. Multiple
-category scans each read their input independently.
+When the input matches multiple files, `filename` identifies each row's source.
+It is only added when more than one file matches. Missing values become `NULL`;
+files without the requested category contribute no rows.
 
-For custom categories/items or only the columns present in your files, opt into
-`column_source := 'files'`. It reads all inputs during binding, discovers their
-column union and retains their indexes. It errors if no file contains the category.
-`SELECT *` in default dictionary mode includes every defined column; attached
-tables and metadata functions still expose only columns present in the file.
-Unknown items in unrelated categories do not block a scan. These checks cover
-known names and projected value casts, not full dictionary validation.
+By default, scans include all dictionary columns. For custom categories/items,
+or to include only columns present in your files, use `column_source := 'files'`:
 
-Enable DuckDB's terminal progress bar for long scans:
+```sql
+SELECT * FROM mmcif_scan('structures/*.cif', 'my_category',
+                        column_source := 'files');
+```
+
+Each scan combines rows from the same category across all matched files;
+no join or aggregation is needed.
+
+For long scans, enable the progress bar and choose how many threads to use:
 
 ```sql
 SET enable_progress_bar = true;
-SET progress_bar_time = 1000;
+SET threads = 6; -- Reduce this to use less memory
+SELECT count(*) FROM mmcif_scan('structures/**/*.cif.gz', 'atom_site');
 ```
 
-Scans report completed files, including files without the requested category in
-dictionary mode. Files have equal weight, so large files can make the bar pause.
-The callback reports execution progress; glob expansion and explicit file-based
-column discovery happen during binding and have no progress feedback.
-
-File-discovered and attached scans prefer materialized write-store sizes or
-already-cached category counts for planner estimates. Otherwise, dictionary
-single-row categories are
-estimated at one row per selected block/file; other categories retain the
-one-row-per-file fallback. Planning does not open files or count uncached loops
-to obtain these estimates. Estimates do not impose row limits or validate files:
-nonconforming files still return all rows, and missing categories can contribute
-zero rows in dictionary mode.
-
-Use a single scan for parallel aggregates:
-
-```sql
-SET threads = 6;
-SELECT count(*) FROM mmcif_scan('structures/**/*.cif.gz', 'atom_site',
-                              column_source := 'dictionary');
-```
-
-Reduce `threads` to limit active file buffers; `SET threads = 1` uses one reader.
-DuckDB controls which queries can execute in parallel. With its default
-insertion-order preservation, file batch indices retain input order when
-materializing rows, and a simple `LIMIT` uses one reader to avoid unnecessary
-file reads. Other queries can open several files before returning rows.
-[See the runnable parallel-count example](docs/examples/count_parallel.sql).
-
-`ATTACH` requires one exact file path. Multi-file access is provided by
-`mmcif_scan`; the metadata functions (`mmcif_tables`, `mmcif_columns`,
-`mmcif_relationships`, and `mmcif_blocks`) take one file.
-
-To combine metadata from different categories, call `mmcif_scan` for each category
-and join on `filename`. For example, resolution comes from `refine` and deposition
-date from `pdbx_database_status`:
-
-```sql
-WITH resolutions AS (
-    SELECT filename, min(ls_d_res_high) AS resolution
-    FROM mmcif_scan('structures/**/*.cif.gz', 'refine')
-    GROUP BY filename
-), deposits AS (
-    SELECT filename, min(recvd_initial_deposition_date::DATE) AS deposit_date
-    FROM mmcif_scan('structures/**/*.cif.gz', 'pdbx_database_status')
-    GROUP BY filename
-)
-SELECT e.filename, e.id, r.resolution, d.deposit_date
-FROM mmcif_scan('structures/**/*.cif.gz', 'entry') e
-LEFT JOIN resolutions r USING (filename)
-LEFT JOIN deposits d USING (filename);
-```
-
-The glob should match multiple files for this filename-based join. Aggregate categories with
-multiple rows per file before joining to avoid multiplying results; left joins
-retain entries missing a resolution or deposition date. A runnable version lives
-in [`metadata_multiple.sql`](docs/examples/metadata_multiple.sql).
-
-## Multiple data blocks
-
-A file can contain multiple blocks, each beginning with `data_name` and ending
-at the next block or the end of the file. List their names in file order:
-
-```sql
-SELECT * FROM mmcif_blocks('structures.cif'); -- block_name (without data_)
-```
-
-Existing functions and `ATTACH` use the first block by default. Select another
-block by name (case-insensitive):
-
-```sql
-SELECT * FROM mmcif_scan('structures.cif', 'atom_site', data_block := 'model2');
-SELECT * FROM mmcif_tables('structures.cif', data_block := 'model2');
-SELECT * FROM mmcif_columns('structures.cif', data_block := 'model2');
-SELECT * FROM mmcif_relationships('structures.cif', data_block := 'model2');
-ATTACH 'structures.cif' AS model2 (TYPE mmcif, DATA_BLOCK 'model2');
-```
-
-Unknown or ambiguous block names produce an error. Gzip and remote reads support
-the same selection. `READ_WRITE TRUE` edits the selected block and preserves the
-other blocks verbatim.
+`ATTACH` and the metadata functions take one file; use `mmcif_scan` for multiple
+files. To select a specific data block in every file, add `data_block := 'name'`
+(see [Multiple data blocks](#multiple-data-blocks)).
 
 ## Ligands
 
@@ -276,6 +156,28 @@ USE liganddb;
 
 SELECT id, name, type, formula FROM chem_comp;
 -- ATP, "ADENOSINE-5'-TRIPHOSPHATE", NON-POLYMER, "C10 H16 N5 O13 P3"
+```
+
+## Multiple data blocks
+
+A file can contain multiple blocks, each beginning with `data_name`, such as
+the wwPDB [Chemical Component Dictionary (`components.cif.gz`)](https://files.wwpdb.org/pub/pdb/data/monomers/components.cif.gz),
+which has a separate block for each chemical component. List their names:
+
+```sql
+SELECT * FROM mmcif_blocks('components.cif.gz'); -- block_name (without data_)
+```
+
+Existing functions and `ATTACH` use the first block by default. Select another
+block by name (case-insensitive), without the `data_` prefix. For example,
+select `data_ATP` from the Chemical Component Dictionary:
+
+```sql
+SELECT * FROM mmcif_scan('components.cif.gz', 'chem_comp', data_block := 'ATP');
+SELECT * FROM mmcif_tables('components.cif.gz', data_block := 'ATP');
+SELECT * FROM mmcif_columns('components.cif.gz', data_block := 'ATP');
+SELECT * FROM mmcif_relationships('components.cif.gz', data_block := 'ATP');
+ATTACH 'components.cif.gz' AS atpdb (TYPE mmcif, DATA_BLOCK 'ATP');
 ```
 
 ## Read-only by default
