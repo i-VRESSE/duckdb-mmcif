@@ -465,9 +465,9 @@ static void MmcifScan(ClientContext &context, TableFunctionInput &data, DataChun
 	while (true) {
 		// Missing union columns start as NULL for each file/chunk.
 		for (idx_t c = 0; c < out_cols; c++) {
-			FlatVector::Validity(*tmp[c]).SetAllValid(STANDARD_VECTOR_SIZE);
+			FlatVector::ValidityMutable(*tmp[c]).SetAllValid(STANDARD_VECTOR_SIZE);
 			if (!lstate.bind.write_category && lstate.out_to_full[c] == DConstants::INVALID_INDEX) {
-				FlatVector::Validity(*tmp[c]).SetAllInvalid(STANDARD_VECTOR_SIZE);
+				FlatVector::ValidityMutable(*tmp[c]).SetAllInvalid(STANDARD_VECTOR_SIZE);
 			}
 		}
 		count = lstate.bind.write_category ? MmcifScanStore(output, lstate, tmp, ptrs)
@@ -492,9 +492,10 @@ static void MmcifScan(ClientContext &context, TableFunctionInput &data, DataChun
 			if (lstate.column_ids[c] == lstate.bind.filename_column) {
 				// The missing-column mask must not survive into a filename
 				// constant, especially when downstream storage flattens it.
-				FlatVector::Validity(*tmp[c]).SetAllValid(STANDARD_VECTOR_SIZE);
+				FlatVector::ValidityMutable(*tmp[c]).SetAllValid(STANDARD_VECTOR_SIZE);
 				tmp[c]->Reference(Value(lstate.bind.dictionary_schema ? lstate.bind.paths[lstate.file_position]
-				                                                      : lstate.bind.files[lstate.file_position].path));
+				                                                      : lstate.bind.files[lstate.file_position].path),
+				                  count_t(count));
 			}
 		}
 	}
@@ -738,7 +739,7 @@ static void MmcifRegisterDescribed(ExtensionLoader &loader, TableFunction functi
 	                                                           : TableFunctionSet(std::move(function)));
 	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
 	for (auto &overload : info.functions.functions) {
-		desc.parameter_types = overload.arguments;
+		desc.parameter_types = overload->arguments;
 		info.descriptions.push_back(desc);
 	}
 	loader.RegisterFunction(std::move(info));

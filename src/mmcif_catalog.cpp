@@ -219,7 +219,8 @@ public:
 
 MmcifTableEntry::MmcifTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info,
                                  string table_name_p, MmcifCatalog *catalog_p)
-    : TableCatalogEntry(catalog, schema, info), table_name(std::move(table_name_p)), catalog(catalog_p), columns(std::move(info.columns)) {
+    : TableCatalogEntry(catalog, schema, info), table_name(std::move(table_name_p)), catalog(catalog_p),
+      columns(std::move(info.columns)) {
 }
 
 const ColumnList &MmcifTableEntry::GetColumns() const {
