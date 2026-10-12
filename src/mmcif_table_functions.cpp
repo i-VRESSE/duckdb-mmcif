@@ -579,9 +579,8 @@ TableFunction MmcifScanFunction() {
 	result.projection_pushdown = true;
 	result.table_scan_progress = MmcifScanProgress;
 	result.cardinality = MmcifScanCardinality;
-	result.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
-		options.Add("column_source", LogicalType::VARCHAR);
-	});
+	result.GetSignature().WithTypedKwargs(
+	    "options", [](TypedKwargs &options) { options.Add("column_source", LogicalType::VARCHAR); });
 	return result;
 }
 
@@ -721,7 +720,9 @@ static unique_ptr<FunctionData> MmcifRelationshipsBind(ClientContext &context, T
 static void MmcifRegisterDescribed(ExtensionLoader &loader, TableFunction function, vector<string> parameter_names,
                                    string description, vector<string> examples) {
 	if (function.name != "mmcif_blocks") {
-		auto configure = [](TypedKwargs &options) { options.Add("data_block", LogicalType::VARCHAR); };
+		auto configure = [](TypedKwargs &options) {
+			options.Add("data_block", LogicalType::VARCHAR);
+		};
 		if (function.GetSignature().GetTypedKwargs()) {
 			function.GetSignature().ExtendTypedKwargs(configure);
 		} else {
