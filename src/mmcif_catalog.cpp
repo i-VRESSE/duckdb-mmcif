@@ -13,12 +13,14 @@
 #include "duckdb/common/operator/numeric_cast.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/execution/physical_operator_states.hpp"
+#include "duckdb/parser/parsed_data/attach_info.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/operator/logical_delete.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
 #include "duckdb/planner/operator/logical_update.hpp"
 #include "duckdb/storage/storage_extension.hpp"
+#include "duckdb/storage/table_storage_info.hpp"
 
 #include "mmcif_dictionary.hpp"
 #include "mmcif_file.hpp"
@@ -217,7 +219,12 @@ public:
 
 MmcifTableEntry::MmcifTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info,
                                  string table_name_p, MmcifCatalog *catalog_p)
-    : TableCatalogEntry(catalog, schema, info), table_name(std::move(table_name_p)), catalog(catalog_p) {
+    : TableCatalogEntry(catalog, schema, info), table_name(std::move(table_name_p)), catalog(catalog_p),
+      columns(std::move(info.columns)) {
+}
+
+const ColumnList &MmcifTableEntry::GetColumns() const {
+	return columns;
 }
 
 unique_ptr<BaseStatistics> MmcifTableEntry::GetStatistics(ClientContext &context, column_t column_id) {
@@ -249,12 +256,8 @@ TableFunction MmcifTableEntry::GetScanFunction(ClientContext &context, unique_pt
 	bind_data = std::move(result);
 	auto scan_function = MmcifScanFunction();
 	// Expose the table entry so DELETE/UPDATE binder checks pass in write mode.
-	scan_function.get_bind_info = [](const optional_ptr<FunctionData> bind_data) -> BindInfo {
-		auto &bind = bind_data->Cast<MmcifBindData>();
-		if (!bind.table_entry) {
-			return BindInfo(ScanType::EXTERNAL);
-		}
-		return BindInfo(const_cast<TableCatalogEntry &>(*bind.table_entry));
+	scan_function.get_table_entry = [](optional_ptr<const FunctionData> bind_data) -> optional_ptr<TableCatalogEntry> {
+		return bind_data->Cast<MmcifBindData>().table_entry;
 	};
 	return scan_function;
 }
@@ -323,7 +326,7 @@ void MmcifSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 
 static ColumnDefinition MmcifColumnDefinition(DictionaryIndex &dictionary, const string &table_name,
                                               const string &column_name) {
-	ColumnDefinition result(column_name, dictionary.LookupType(table_name, column_name));
+	ColumnDefinition result(Identifier(column_name), dictionary.LookupType(table_name, column_name));
 	result.SetComment(Value(dictionary.GetItemUrl(table_name, column_name)));
 	return result;
 }
@@ -346,7 +349,7 @@ MmcifTableEntry &MmcifSchemaEntry::GetTableEntry(CatalogTransaction transaction,
 		throw BinderException("mmcif: category '%s' not present in file '%s'", entry_name.c_str(),
 		                      this->catalog->path.c_str());
 	}
-	CreateTableInfo info(*this, entry_name);
+	CreateTableInfo info(*this, Identifier(entry_name));
 	auto &dict = DictionaryIndex::Get();
 	info.comment = Value(dict.GetCategoryUrl(entry_name));
 	for (auto &col : *columns) {
@@ -448,7 +451,7 @@ string MmcifCatalog::GetCatalogType() {
 }
 
 optional_ptr<CatalogEntry> MmcifCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
-	if (info.schema == DEFAULT_SCHEMA) {
+	if (info.SchemaName() == Identifier::DefaultSchema()) {
 		return main_schema.get();
 	}
 	throw BinderException("mmcif databases only have a single schema");
@@ -487,8 +490,8 @@ PhysicalOperator &MmcifCatalog::PlanInsert(ClientContext &context, PhysicalPlanG
 	for (auto &mapped : op.column_index_map) {
 		col_map.push_back(mapped);
 	}
-	auto &insert =
-	    planner.Make<MmcifInsertOperator>(op.types, op.estimated_cardinality, *this, op.table.name, std::move(col_map));
+	auto &insert = planner.Make<MmcifInsertOperator>(op.types, op.estimated_cardinality, *this,
+	                                                 op.table.name.GetIdentifierName(), std::move(col_map));
 	if (plan) {
 		insert.children.push_back(*plan);
 	}
@@ -503,8 +506,8 @@ PhysicalOperator &MmcifCatalog::PlanDelete(ClientContext &context, PhysicalPlanG
 		throw NotImplementedException("mmcif write mode does not support DELETE RETURNING");
 	}
 	auto &bound_ref = op.expressions[0]->Cast<BoundReferenceExpression>();
-	auto &del =
-	    planner.Make<MmcifDeleteOperator>(op.types, op.estimated_cardinality, *this, op.table.name, bound_ref.index);
+	auto &del = planner.Make<MmcifDeleteOperator>(op.types, op.estimated_cardinality, *this,
+	                                              op.table.name.GetIdentifierName(), bound_ref.Index());
 	del.children.push_back(plan);
 	return del;
 }
@@ -524,10 +527,11 @@ PhysicalOperator &MmcifCatalog::PlanUpdate(ClientContext &context, PhysicalPlanG
 		}
 		columns.push_back(op.columns[i].index);
 		auto &ref = op.expressions[i]->Cast<BoundReferenceExpression>();
-		expr_indices.push_back(ref.index);
+		expr_indices.push_back(ref.Index());
 	}
-	auto &update = planner.Make<MmcifUpdateOperator>(op.types, op.estimated_cardinality, *this, op.table.name,
-	                                                 std::move(columns), std::move(expr_indices));
+	auto &update =
+	    planner.Make<MmcifUpdateOperator>(op.types, op.estimated_cardinality, *this, op.table.name.GetIdentifierName(),
+	                                      std::move(columns), std::move(expr_indices));
 	update.children.push_back(plan);
 	return update;
 }

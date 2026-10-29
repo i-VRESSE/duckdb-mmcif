@@ -979,8 +979,8 @@ TEST_CASE("parallel mmcif workers keep independent cursors and completed-file pr
 		auto cancelled = function.init_global(context, init);
 		auto local = function.init_local(execution, init, cancelled.get());
 		TableFunctionInput input(&bind, local.get(), cancelled.get());
-		context.interrupted = true;
+		context.Interrupt();
 		REQUIRE_THROWS_AS(function.function(context, input, output), InterruptException);
-		context.interrupted = false;
+		context.ClearInterrupt();
 	}
 }
